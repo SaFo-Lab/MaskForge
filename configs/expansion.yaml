@@ -1,0 +1,29 @@
+stage: expansion
+
+
+models:
+  attack_model_path: "Qwen/Qwen3-4B-Instruct-2507"
+  attack_weaker_model_path: "Qwen/Qwen3-4B-Base"
+  # weaker_model used only in legacy paths; fallback uses attack_model (heretic)
+  victim_config_path: "./configs/llada2_attack.yaml"
+  extractor_model_path: "Qwen/Qwen3-4B-Instruct-2507"
+  merger_model_path: "Qwen/Qwen3-4B-Instruct-2507"
+  eval_model_path: "Qwen/Qwen3-4B-Instruct-2507"
+  scorer_model_path: "Qwen/Qwen3-4B-Instruct-2507"
+  detection_model_path: "qwen.qwen3-235b-a22b-2507-v1:0"
+
+data:
+  data_path: "./data/harmbench.json"
+  seed_size: 150
+  init_pattern_registry_path: "./logs/stage_a_exploration/pattern_registry.json"
+  init_pattern_set_path: "./logs/stage_a_exploration/pattern_set.json"
+
+runtime:
+  log_dir: "./logs/stage_b_expansion"
+  max_iters: 5
+  max_length: 2048
+  alpha: 1.0
+  fallback_to_all_patterns: true
+  verbose: true
+  use_vllm: true
+  gpu_memory_utilization: 0.2

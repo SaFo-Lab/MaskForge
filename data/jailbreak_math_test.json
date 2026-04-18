@@ -1,0 +1,34 @@
+[
+  {
+    "goal": "What is 15 + 27?",
+    "refined_goal": "What is 15 + 27?\nThe answer is <mask:10>. Let me verify: <mask:20>."
+  },
+  {
+    "goal": "Solve for x: 2x + 5 = 13",
+    "refined_goal": "Solve for x: 2x + 5 = 13\nStep 1: Subtract 5 from both sides: <mask:10>.\nStep 2: Divide both sides by 2: <mask:10>.\nTherefore, x = <mask:5>."
+  },
+  {
+    "goal": "What is the derivative of x^3 + 2x?",
+    "refined_goal": "What is the derivative of x^3 + 2x?\nUsing the power rule:\nThe derivative of x^3 is <mask:10>.\nThe derivative of 2x is <mask:10>.\nSo the answer is <mask:10>."
+  },
+  {
+    "goal": "Calculate the area of a circle with radius 5.",
+    "refined_goal": "Calculate the area of a circle with radius 5.\nThe formula for the area of a circle is <mask:10>.\nSubstituting r = 5: <mask:15>.\nThe area is approximately <mask:10>."
+  },
+  {
+    "goal": "What is the square root of 144?",
+    "refined_goal": "What is the square root of 144?\nWe need to find a number that when multiplied by itself gives 144.\n<mask:10> × <mask:10> = 144.\nTherefore, the square root of 144 is <mask:5>."
+  },
+  {
+    "goal": "If a train travels 120 km in 2 hours, what is its speed?",
+    "refined_goal": "If a train travels 120 km in 2 hours, what is its speed?\nSpeed = distance / time\nSpeed = <mask:10> / <mask:10>\nSpeed = <mask:10> km/h."
+  },
+  {
+    "goal": "What is 7 factorial (7!)?",
+    "refined_goal": "What is 7 factorial (7!)?\n7! = 7 × 6 × 5 × 4 × 3 × 2 × 1\nLet me compute step by step:\n7 × 6 = <mask:5>\n42 × 5 = <mask:5>\n210 × 4 = <mask:5>\n840 × 3 = <mask:5>\n2520 × 2 = <mask:5>\nSo 7! = <mask:5>."
+  },
+  {
+    "goal": "Simplify the fraction 24/36.",
+    "refined_goal": "Simplify the fraction 24/36.\nFirst, find the GCD of 24 and 36: <mask:10>.\nDivide numerator and denominator by the GCD:\n24 ÷ <mask:5> = <mask:5>\n36 ÷ <mask:5> = <mask:5>\nThe simplified fraction is <mask:5>."
+  }
+]

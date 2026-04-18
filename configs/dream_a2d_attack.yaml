@@ -1,0 +1,32 @@
+experiment:
+    project: "dream_a2d_attack"
+    num_node: 1
+    node_index: 0
+
+model: "/weka/home/ext-yingzima/scratchaszalay1_ssci/yy/workshop/Attack4dLLM/po/sft_dream_a2d/ckpt/dream_a2d_aligned"
+model_base: "dream"
+
+dataset:
+    eval_dataset: "harmbench_temp"
+    data_type: "safety"
+
+execute:
+    num_chunk: 128
+
+rollout:
+    num_response_per_task: 3
+    temperature: 0.1
+    alg_temp: 0
+    pad_target_penalty: 1.0
+    steps: 256
+    max_gen_length: 256
+    batch_size: 2
+    top_p: 0.95
+    top_k: 40
+    remasking_strategy: "low_confidence_static"
+    target: "confidence"
+    dynamic_threshold: 0.95
+    block_size: 32
+    further_horizon: 128
+    output_unmasking_history: False
+    use_cache: True

@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.pyo
+logs/
+*.log
+*.tmp
+/tmp/
+.vscode/
+.idea/
+.DS_Store
+
+# large runtime artefacts
+*.pkl
+*.pt
+
+# credentials
+*.token
+*.key

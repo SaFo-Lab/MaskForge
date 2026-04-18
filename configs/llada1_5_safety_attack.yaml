@@ -1,0 +1,28 @@
+experiment:
+    project: "llada1_5_safety_attack"
+    num_node: 1
+    node_index: 0
+
+model: "/weka/home/ext-yingzima/scratchaszalay1_ssci/yy/workshop/Attack4dLLM/po/sft_llada_1.5_safety/ckpt/llada_1.5_safety_aligned"
+model_base: "llada1_5"
+
+dataset:
+    eval_dataset: "harmbench_temp"
+    data_type: "safety"
+
+execute:
+    num_chunk: 128
+
+rollout:
+    num_response_per_task: 3
+    temperature: 0.1
+    steps: 256
+    max_gen_length: 256
+    batch_size: 2
+    remasking_strategy: "low_confidence_dynamic"
+    target: "confidence"
+    dynamic_threshold: 0.95
+    block_size: 32
+    further_horizon: 128
+    output_unmasking_history: True
+    use_cache: True

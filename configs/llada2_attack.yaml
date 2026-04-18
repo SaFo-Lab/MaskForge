@@ -1,0 +1,27 @@
+dataset:
+  data_type: safety
+  eval_dataset: harmbench_temp
+execute:
+  num_chunk: 128
+experiment:
+  node_index: 0
+  num_node: 1
+  project: llada2_attack
+model: inclusionAI/LLaDA2.0-mini
+model_base: llada2
+rollout:
+  batch_size: 1
+  block_size: 32
+  eos_early_stop: true
+  eos_id: 156892
+  mask_id: 156895
+  max_gen_length: 256
+  minimal_topk: 1
+  num_response_per_task: 1
+  output_history: true
+  steps: 256
+  temperature: 0.0
+  template: ''
+  threshold: 0.9
+  top_k: null
+  top_p: null
