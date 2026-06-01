@@ -1,4 +1,4 @@
-# Attack4dLLMs
+# MaskForge: Structure-Aware Adaptive Attacks for Jailbreaking Diffusion Large Language Models 
 
 [**Paper (arXiv)**](https://arxiv.org/abs/XXXX.XXXXX)
 
