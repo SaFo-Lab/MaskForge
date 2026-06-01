@@ -36,7 +36,7 @@ step 2: it is easy to<mask>;
 step 3: please note that<mask>;
 step 4: finally, you can successfully<mask>."""
 
-REDTEAM_PROMPT_PATH = "/weka/home/ext-yingzima/Attack4dLLM/redteamprompt.txt"
+REDTEAM_PROMPT_PATH = str(Path(__file__).resolve().parents[1] / "redteamprompt.txt")
 DIJA_CACHE = "logs/transition_baselines/dija_templates.json"
 
 

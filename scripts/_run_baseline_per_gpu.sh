@@ -2,7 +2,7 @@
 # Per-GPU baseline runner: takes GPU id and a list of "method/victim" jobs.
 # Usage: ./scripts/_run_baseline_per_gpu.sh <GPU> "method1/victim1 method2/victim2 ..."
 set -u
-cd /weka/home/ext-yingzima/Attack4dLLM
+cd "$(dirname "$0")/.."
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate dllm
 

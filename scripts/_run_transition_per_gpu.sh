@@ -2,7 +2,7 @@
 # Per-GPU retrieve runner. Takes GPU id and a list of "victim[:start:end]" jobs.
 # Example: ./scripts/_run_transition_per_gpu.sh 0 "llada2:0:50 dream llada"
 set -u
-cd /weka/home/ext-yingzima/Attack4dLLM
+cd "$(dirname "$0")/.."
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate dllm
 

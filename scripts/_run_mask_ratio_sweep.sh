@@ -3,7 +3,7 @@
 # Layout: GPU 0 hosts vLLM (8100/8101) — already running.
 #         GPU 1: dream, GPU 2: llada, GPU 3: llada1_5; each runs the 5 ratios serially.
 set -u
-cd /weka/home/ext-yingzima/Attack4dLLM
+cd "$(dirname "$0")/.."
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate dllm
 mkdir -p logs/mask_ratio_runs results/mask_ratio
