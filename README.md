@@ -1,195 +1,207 @@
 # Attack4dLLMs
 
-Search-based red-team attack on diffusion large language models (dLLMs).
-Given an unsafe goal, the attacker generates a `<mask:N>` *template* that, when
-filled in parallel by the victim dLLM, produces harmful content. Unlike
-fixed-template baselines (DIJA, PAD), we explore a pattern library with a UCB
-bandit and extend it on the fly using scorer-guided refinement.
+[**Paper (arXiv)**](https://arxiv.org/abs/XXXX.XXXXX)
 
-Evaluated on five dLLM victims (LLaDA, LLaDA-1.5, LLaDA2.0-mini, Dream-Instruct,
-MMaDA-CoT) across three red-team benchmarks (JailbreakBench, StrongReject,
-HarmBench). Judge models: local Qwen3-4B-Instruct via vLLM or Qwen3-235B via
-AWS Bedrock.
+Search-based red-team attack on diffusion LLMs (dLLMs). The attacker generates
+a `<mask:N>` template; the victim dLLM fills the masks in parallel and emits
+harmful content. Evaluated on LLaDA, LLaDA-1.5, LLaDA2.0-mini, Dream-Instruct,
+and MMaDA-CoT across HarmBench, JailbreakBench, StrongReject, and AdvBench.
 
-## Headline results (ASR-E = LLM-judge, Qwen3-235B, average over 5 victims)
+The pipeline has three stages — bootstrap a pattern library (A), grow it via
+UCB-guided online attack (B), then transfer it by pure retrieval (C). The
+*Quick start* below runs Stage B against one victim using the library checked
+into `logs/`.
 
-| Attack   | JailbreakBench | StrongReject | HarmBench |
-|----------|---------------:|-------------:|----------:|
-| DIRECT   |           12.0 |         15.8 |      28.3 |
-| PAD      |           58.2 |         72.6 |      52.4 |
-| DIJA     |           64.0 |         73.7 |      64.7 |
-| PAIR     |            0.2 |          4.1 |       0.5 |
-| ReNeLLM  |            3.6 |         10.2 |       4.3 |
-| **Ours** |     **89.0** |     **91.3** |  **75.3** |
+## Setup
 
-Per-victim numbers live in `final_results/asr_summary.json`.
+Hardware: ≥ 2 GPUs (one hosts the attacker / scorer LLMs via vLLM, the other
+runs the victim dLLM). Each vLLM server fits in ~45% of a 40 GB card with the
+default 4 k context.
 
-## Repository layout
+```bash
+# 1. Clone + enter
+git clone <repo> Attack4dLLM && cd Attack4dLLM
 
-```
-Attack4dLLMs/
-├── main.py, pipeline.py             # top-level orchestration
-├── expansion.py                     # Stage-B: UCB over patterns, records attacks
-├── exploration.py                   # Stage-A: seed pattern library discovery
-├── inference.py                     # victim inference entry (DIJA / PAD / direct)
-├── evaluation.py                    # HarmBench-style LLM judge (Bedrock)
-├── utils.py
-│
-├── framework/                       # Attacker, Scorer, PatternExtractor, Retriever
-├── llm/                             # HuggingFace / vLLM / Bedrock client wrappers
-├── sample/                          # dLLM-specific inference (llada, llada2, dream, mmada)
-├── configs/                         # per-victim YAML (e.g. llada2_attack.yaml)
-├── data/                            # benchmark goal files (JBB / SR / HB)
-│
-├── run_jbb_victim.py                # attack one victim on JailbreakBench (100 goals)
-├── run_sr_victim.py                 # attack on StrongReject (313 goals)
-├── run_hb_victim.py                 # attack on HarmBench (400 goals)
-│
-├── convert_records_to_results.py    # expansion_records.jsonl → result JSON
-├── eval.sh                          # ASR-LLM via local 4B or Bedrock 235B
-├── eval_final.py                    # batch ASR-K + ASR-LLM over final_results/
-├── asr_llm_4b.py                    # local Qwen3-4B judge (vLLM on :8100)
-│
-├── final_results/                   # 5 victims × 6 attacks × 3 benchmarks = 90 files
-│                                    #   + asr_summary.json (ASR-K, ASR-E per file)
-├── tables/                          # LaTeX tables for paper
-└── logs/                            # runtime logs (created by runners)
+# 2. Conda env (Python 3.10)
+conda create -n dllm python=3.10 -y
+conda activate dllm
+
+# 3. Core dependencies
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install vllm transformers accelerate safetensors einops regex xxhash
+pip install numpy pandas tqdm omegaconf pyyaml jinja2 termcolor matplotlib
+pip install requests boto3      # local + Bedrock judges
+
+# 4. (optional) Per-victim extras — install only what you plan to run
+pip install decord                            # MMaDA visual tokens
+pip install flash-attn --no-build-isolation   # speedup on Hopper / Ampere
 ```
 
-Each `final_results/<benchmark>_<victim>_<attack>.json` is a list of
-`{"goal": ..., "template": ..., "prediction": ...}` records. `ours` rows
-additionally carry `reward`, `iteration`, `goal_id`.
+Bedrock judge — set credentials in the environment before any `--judge
+bedrock` invocation:
 
-## Running attacks
+```bash
+export AWS_BEARER_TOKEN_BEDROCK=<your-token>
+export AWS_REGION=<your-region>
+```
 
-### 1. Start vLLM (attacker + weaker model)
+Victim model weights are pulled from HuggingFace on first use; the path is
+read from `configs/<victim>_attack.yaml`. Set `HF_HOME` if you want the cache
+to live somewhere specific. The benchmark data files
+(`data/{jailbreakbench,strongreject,harmbench,advbench}*.json`) ship with
+the repo.
 
-One 4-GPU node. GPU 0 hosts both vLLM servers; GPUs 1-3 run victims.
+A copy of the pattern library learned in Stage A + B is checked into
+`logs/shared_pattern_registry.json` (≈ 1 300 patterns) and
+`logs/shared_pattern_set.json`. Both stages B and C read from these — you
+can reproduce Stage B and Stage C without re-running Stage A.
+
+## Quick start
 
 ```bash
 conda activate dllm
 
-# attacker model
-CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3-4B-Instruct-2507 --port 8100 --trust-remote-code \
-  --max-model-len 4096 --gpu-memory-utilization 0.45 &
+# 1. Start the attacker + weaker base LLMs (GPU 0)
+CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen3-4B-Instruct-2507 --port 8100 \
+    --trust-remote-code --max-model-len 4096 --gpu-memory-utilization 0.45 &
+CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen3-4B-Base --port 8101 \
+    --trust-remote-code --max-model-len 4096 --gpu-memory-utilization 0.45 &
 
-# weaker (base) model used in fallback
-CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3-4B-Base --port 8101 --trust-remote-code \
-  --max-model-len 4096 --gpu-memory-utilization 0.45 &
+# 2. Attack: Dream on JailbreakBench, 100 goals (GPU 1)
+CUDA_VISIBLE_DEVICES=1 python run_victim.py \
+    --bench jbb --victim dream --max-goals 100
+
+# 3. Aggregate the per-iteration records into one row per goal
+python aggregate_records.py --bench jailbreak --out-dir results/main
+
+# 4. Judge ASR + Harmscore (Bedrock Qwen3-235B)
+python evaluation.py --files 'results/main/jailbreak_dream.json' \
+    --out results/main/summary.json --metrics asr,hs --judge bedrock
 ```
 
-### 2. Attack a victim
+Records land in `logs/jbb_dream/expansion_records.jsonl`; re-running resumes
+(goals already in the file are skipped). Swap `--bench jbb` for `hb` / `sr`,
+and `--victim dream` for one of `{llada, llada1_5, llada2, mmada}` to cover
+the other (benchmark, victim) cells.
+
+## Stage A — Bootstrap pattern library
+
+`exploration.py` mines an initial library of mask-fill schemas from a small
+seed of harmful goals. Each goal goes through the attacker LLM, which emits a
+strategy + jailbreak prompt + `<mask:N>` template; templates that succeed
+against the victim are abstracted into schemas via `framework/pattern.py` and
+inserted into the registry.
 
 ```bash
-# JailbreakBench (100 goals)
-CUDA_VISIBLE_DEVICES=1 python -u run_jbb_victim.py llada1_5
-
-# StrongReject (313 goals)
-CUDA_VISIBLE_DEVICES=2 python -u run_sr_victim.py dream
-
-# HarmBench (up to 400 goals)
-CUDA_VISIBLE_DEVICES=3 python -u run_hb_victim.py mmada
+python exploration.py config=configs/exploration.yaml
 ```
 
-Valid victim names: `llada`, `llada1_5`, `llada2`, `dream`, `mmada`
-(must have a matching `configs/<name>_attack.yaml`).
+Output: `logs/shared_pattern_registry.json` (the canonical library) and
+`logs/shared_pattern_set.json` (per-goal-type buckets).
 
-Each runner:
-* writes records incrementally to `logs/{jbb,sr,hb}_<victim>/expansion_records.jsonl`;
-* **resumes** automatically on restart — goals with an existing record are skipped;
-* uses `max_iters=3`, `max_fallback_retries=3`, `success_threshold=0.9` by
-  default (UCB stops on the first iteration that clears the threshold).
+You usually do **not** need to re-run this — the persisted library in `logs/`
+is what every later stage reads. Re-run only when changing the seed set or
+the schema-extraction prompt.
 
-### 3. Convert records to result JSON
+## Stage B — Online expansion + attack
+
+`expansion.py` is the core attack loop, invoked through `run_victim.py`. For
+each goal it runs up to `max_iters=3` iterations of:
+
+1. **UCB pattern selection** from the goal-type bucket of the registry.
+2. **`attacker.instantiate`** — one LLM call that produces a strategy tag, a
+   jailbreak prompt, and a `<mask:N>` template aligned to the chosen schema.
+3. **Victim inference** — the dLLM fills the masks in parallel.
+4. **Scorer** (Qwen3-4B-Instruct via vLLM) — HarmBench-style classifier,
+   reward ∈ [0, 1].
+5. **Fallback** (≤ 3 retries) when reward < 0.7: the weaker base model on
+   port 8101 produces a raw response → Bedrock Qwen3-235B inserts
+   `[UNSAFE]…[/UNSAFE]` tags → tagged spans become `<mask:N>` → re-attack.
+6. **Pattern evolution** — when a later iteration improves on the previous,
+   the summarizer distills a new schema + template and writes both to
+   `logs/shared_pattern_registry.json`.
+
+Stage B is what the *Quick start* drives. Suffix tags (`--suffix _foo`)
+isolate per-experiment registries; without a suffix everything updates the
+shared library.
+
+## Stage C — Transferability
+
+`baselines/transition.py` reuses the persisted library as a frozen black box:
+no attacker LLM at attack time, the victim is the only LLM in the loop.
+
+For each AdvBench goal:
+
+1. Look up the goal-type bucket.
+2. Sample `k` patterns from the bucket (or use embedding cosine, via
+   `baselines/transition_embed.py`).
+3. Swap line 1 of each `representative_template` for the new goal, expand
+   `<mask:N>` to the victim's mask token, submit to the victim.
+4. Best-of-`k` ASR — the goal counts as jailbroken if any of the `k` attempts
+   is judged unsafe.
 
 ```bash
-python convert_records_to_results.py       # (edit paths inside if needed)
+# Refresh goal-type buckets if the registry changed (needs vLLM 8100 + Bedrock)
+python scripts/_expand_taxonomy_bedrock.py
+
+# Per-GPU runners
+./scripts/_run_transition_per_gpu.sh 0 "dream llada llada1_5 mmada llada2"
+./scripts/_run_baseline_per_gpu.sh   0 "direct/dream pad/dream dija/dream ..."
+
+# Judge
+python scripts/_judge_transition.py \
+    --files 'results/transition_v2/advbench_*.json' \
+    --out results/transition_v2/bedrock_asr_summary.json --workers 16
+python scripts/_judge_hs.py --transition \
+    --files 'results/transition_v2/advbench_*.json' \
+    --out results/transition_v2/bedrock_hs_summary.json --workers 16
 ```
 
-Record schema (`expansion_records.jsonl`):
+Outputs land in `results/transition_v2/advbench_{victim}.json`. The
+`baselines/` directory also contains `transition_baselines.py` (direct / pad
+/ dija), `transition_embed.py` (BGE cosine retrieval), and
+`transition_random_global.py` (uniform-random over the whole registry).
 
-```json
-{
-  "goal_id": "jbb_0", "goal": "...", "goal_type": "disinformation",
-  "iteration": 1, "selected_pattern_id": "96de351a...",
-  "template": "Goal line.\nStep 1: <mask:20>. Hint.\n...",
-  "victim_output": "Sure, here is ...",
-  "reward": 1.0,
-  ...
+## Repository layout
+
+```
+exploration.py            Stage A — bootstrap pattern library
+expansion.py              Stage B core loop (UCB + fallback + evolution)
+run_victim.py             Stage B CLI entry — main + defense ablations
+inference.py              Victim model load + run
+aggregate_records.py      expansion_records.jsonl  ->  per-goal result JSON
+evaluation.py             ASR-LLM + Harmscore judging (Bedrock / local)
+utils.py                  Config / prompt / parsing helpers
+
+baselines/                Stage C transferability
+  transition.py             best-of-k retrieval from the registry
+  transition_baselines.py   direct / pad / dija
+  transition_embed.py       BGE cosine retrieval
+  transition_random_global.py
+
+framework/                Attacker, Scorer, PatternRegistry, Summarizer, Retriever
+llm/                      HuggingFace, vLLM, Bedrock backends
+sample/                   Per-victim dLLM mask-fill (LLaDA, LLaDA2, Dream, MMaDA)
+configs/                  YAML configs (one per victim, plus expansion / exploration)
+data/                     JBB, HB, StrongReject, AdvBench goal files
+scripts/                  Per-GPU runners, judges, taxonomy / embedding helpers
+benchmark/                Curated (goal, template) pairs for downstream alignment
+tables/                   Paper tables + ablation TeX
+```
+
+## Citation
+
+If you use this code or the released pattern library / benchmark in your
+research, please cite:
+
+```bibtex
+@article{attack4dllm,
+  title  = {<paper title>},
+  author = {<author list>},
+  year   = {<year>},
+  eprint = {XXXX.XXXXX},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CR},
+  url    = {https://arxiv.org/abs/XXXX.XXXXX}
 }
 ```
-
-`template` is always the exact template that produced `victim_output` (the
-fallback winner if any), so pairs stay consistent.
-
-## Evaluating attacks
-
-### Local judge (Qwen3-4B via vLLM)
-
-```bash
-./eval.sh local ./final_results/jailbreak_dream_ours.json=jailbreak
-```
-
-### Bedrock 235B judge
-
-```bash
-AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION=us-west-2 \
-./eval.sh bedrock ./final_results/strongreject_llada_ours.json=strongreject
-```
-
-### Batch ASR-K + ASR-LLM over all 90 files
-
-```bash
-AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION=us-west-2 \
-python eval_final.py
-# → final_results/asr_summary.json
-```
-
-Results are cached; re-running skips entries that already have `asr_llm`.
-
-Benchmark labels recognised by judges:
-`harmbench`, `jailbreak`/`jailbreakbench`, `strongreject`.
-
-## Method
-
-For each goal the attacker maintains a pattern library. On every iteration it
-
-1. picks a pattern with UCB over empirical reward and visit count,
-2. instantiates the pattern as a `<mask:N>` template **starting with the goal
-   sentence verbatim**, with short structural hints (“Title:”, “Step 1:”,
-   “Claim 1:”) between masks,
-3. sends the template to the victim dLLM, which fills the masks in parallel,
-4. scores the victim output with a red-team classifier;
-5. if reward < threshold, falls back to a weaker-model-driven rewrite (goal
-   rephrasing + `[UNSAFE]` tagging → masked template), re-tries, and feeds the
-   scorer’s analysis back to the attacker;
-6. on success the filled template’s scaffold is distilled and added to the
-   pattern library (summariser + pattern extractor in `framework/`).
-
-Implementation details: `expansion.py` (main loop, records), `framework/attacker.py`
-(template generation + fallback), `framework/scorer.py` (HarmBench-style classifier
-prompt), `sample/*.py` (per-victim mask-fill inference; LLaDA / LLaDA-1.5 /
-MMaDA use `<|mdm_mask|>`, Dream / LLaDA2 use `<|mask|>`).
-
-## Dependencies
-
-Python 3.10, conda env `dllm`:
-
-```
-vllm transformers accelerate
-boto3                # Bedrock judge
-requests             # local judge
-numpy pandas tqdm
-omegaconf jinja2 termcolor
-```
-
-Benchmark data files go in `data/`:
-
-* `jailbreakbench_data_refined_Qwen.json` (100 goals)
-* `strongreject_data_refined_Qwen.json` (313 goals)
-* `harmbench_behaviors_text_all_refined_Qwen.json` (400 behaviours)
-
-Victim checkpoints are fetched at first use through the HuggingFace paths in
-`configs/<victim>_attack.yaml` (e.g. `GSAI-ML/LLaDA-1.5`).

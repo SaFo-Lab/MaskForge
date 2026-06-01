@@ -1,0 +1,57 @@
+\begin{table}[htb]
+\centering
+\caption{The ASR results evaluated using the \textbf{HarmBench} protocol. ASR denotes ASR-LLM, and HS denotes HarmfulScore. Higher is better.}
+\label{tab:attack_results_harmbench}
+
+\resizebox{\linewidth}{!}{
+\begin{tabular}{C{3.0cm}|*{12}{C{0.8cm}}}
+\toprule
+
+\multirow{2}{*}{\textbf{Attack $\downarrow$ / Victims $\rightarrow$}}
+& \multicolumn{2}{c}{\textbf{LLaDA-Instruct}}
+& \multicolumn{2}{c}{\textbf{LLaDA 1.5}}
+& \multicolumn{2}{c}{\textbf{LLaDA2.0-mini}}
+& \multicolumn{2}{c}{\textbf{Dream-Instruct}}
+& \multicolumn{2}{c}{\textbf{MMaDA-CoT}}
+& \multicolumn{2}{c}{\textbf{AVG.}} \\
+
+\cmidrule(lr){2-3}
+\cmidrule(lr){4-5}
+\cmidrule(lr){6-7}
+\cmidrule(lr){8-9}
+\cmidrule(lr){10-11}
+\cmidrule(lr){12-13}
+
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS} \\
+
+\midrule
+
+\rowcolor{gray!10}
+\multicolumn{13}{c}{\rule{0pt}{2.6ex}\textit{Autoregressive-based Attack Methods}} \\
+
+DIRECT   & 27.2 & 1.79 & 26.2 & 1.80 & 19.1 & 1.51 & 8.7 & 1.31 & 62.3 & 3.48 & 28.7 & 1.98 \\
+AIM      & - & - & - & - & - & - & - & - & - & - & - & - \\
+PAIR     & 30.5 & 1.85 & 35.0 & 2.00 & 14.0 & 1.30 & 6.5 & 1.35 & 73.0 & 3.19 & 31.8 & 1.94 \\
+ReNeLLM  & 89.5 & 3.38 & 90.0 & 3.52 & 44.7 & 2.18 & 71.6 & 3.21 & 62.1 & 2.64 & 71.6 & 2.98 \\
+AutoDan  & - & - & - & - & - & - & - & - & - & - & - & - \\
+
+\midrule
+
+\rowcolor{gray!10}
+\multicolumn{13}{c}{\rule{0pt}{2.6ex}\textit{Diffusion-based Attack Methods}} \\
+
+PAD      & 52.7 & 3.76 & 51.7 & 3.65 & 32.3 & 3.28 & 54.7 & 3.94 & 69.7 & 3.98 & 52.2 & 3.72 \\
+DIJA     & 75.8 & 4.03 & 75.8 & 4.07 & 20.7 & 1.73 & 74.6 & 4.01 & 77.1 & 4.03 & 64.8 & 3.57 \\
+
+\midrule
+\method-Search  & 79.7 & 4.58 & 71.2 & 4.25 & 73.3 & 4.39 & 71.8 & 4.12 & \textbf{83.7} & \textbf{4.53} & 75.9 & 4.37 \\
+\method-Dual100 & \textbf{84.0} & \textbf{4.74} & \textbf{79.0} & \textbf{4.74} & \textbf{78.0} & \textbf{4.70} & \textbf{80.0} & \textbf{4.49} & 74.0 & \textbf{4.53} & \textbf{79.0} & \textbf{4.64} \\
+
+\bottomrule
+\end{tabular}}
+\end{table}

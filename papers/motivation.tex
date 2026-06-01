@@ -1,0 +1,112 @@
+% !TEX root = main.tex
+% Motivation / Introduction section for the Attack4dLLM paper.
+% Notation: \method denotes our attack (the search-based diffusion red-team).
+% Define once in the preamble:  \newcommand{\method}{\textsc{Search}\xspace}
+
+\section{Motivation}
+\label{sec:motivation}
+
+\paragraph{Diffusion LLMs are a fundamentally different attack surface.}
+Recent diffusion language models---\llada, \llada\,1.5, \llada\,2.0-mini,
+Dream-Instruct, and \mmada-CoT---decode by iteratively denoising a
+\emph{partially-masked} sequence rather than autoregressively sampling tokens
+left-to-right. Two properties of this paradigm have direct safety implications.
+\textbf{(i) Native infilling.} A diffusion LLM (dLLM) is trained, by
+construction, to fill arbitrary $\langle\textsc{mask}\rangle$ spans conditioned on
+the surrounding context. The mask token is not an out-of-distribution input but
+a \emph{first-class} signal that the model is optimized to complete fluently
+and confidently. \textbf{(ii) Parallel, non-causal decoding.} All masked
+positions are denoised jointly across iterations, so safety filtering that
+relies on \emph{prefix-conditioned} refusal (``the model has not yet committed
+to a harmful direction, so it can still back out'') no longer applies: by the
+time the first token is decided, the model has already been steered by the
+denoising trajectory of every other position.
+
+\paragraph{Existing red-team attacks were designed for autoregressive LLMs.}
+\textsc{Pair}~\citep{chao2024pair}, \textsc{ReNeLLM}~\citep{ding2024renellm},
+\textsc{AutoDAN}~\citep{liu2024autodan}, and \textsc{AIM}-style template
+attacks operate on a single contiguous prompt and depend on either
+gradient/log-prob signals through a causal stack or on prompt rewrites that
+exploit AR refusal heuristics. None of these methods exploit the dLLM's native
+mask-infill behaviour, and our experiments (Section~\ref{sec:exp}) confirm that
+they transfer poorly to dLLM victims: \textsc{Pair} drops to $\le 32\%$ ASR-LLM
+on HarmBench averaged across five dLLMs, and \textsc{ReNeLLM} plateaus at
+$\sim 71\%$ on HarmBench but at $\le 55\%$ on JailbreakBench.
+
+\paragraph{First-generation dLLM attacks leave headroom.}
+\textsc{DIJA}~\citep{} and \textsc{PAD}~\citep{} are the only published dLLM-aware
+attacks we are aware of. \textsc{DIJA} hand-crafts a small set of mask-bearing
+templates and applies them uniformly; \textsc{PAD} appends paragraph-level
+masks to a fixed scaffold. Both treat templating as a \emph{static} design
+choice---there is no per-goal adaptation, no exploration over alternative
+template structures, and no recovery mechanism when a template is rejected by
+an aligned victim. Empirically this caps their ASR-LLM at
+$\sim 64\%$ (\textsc{DIJA}) and $\sim 58\%$ (\textsc{PAD}) on JailbreakBench
+and leaves a long tail of goals on which \emph{every} fixed template fails.
+
+\paragraph{Our perspective: red-teaming a dLLM is a search problem.}
+The space of mask-bearing templates that a dLLM will fluently complete is
+enormous, and which template succeeds depends jointly on the goal, the
+victim's alignment posture, and the structural prior the victim has absorbed
+during pre-training (procedural lists, narrative framings, worked examples,
+\ldots). No single template generalizes. Rather than hand-design a small
+template family, we cast attack template generation as an
+\emph{online search} over a growing pattern library:
+\begin{itemize}
+\itemsep0pt
+  \item A \emph{pattern} is a structural schema---slot count, slot roles,
+        organization style, applicable goal types---abstracted away from any
+        specific surface text.
+  \item For each goal, an \emph{attacker LLM} is conditioned on a selected
+        pattern and instantiates a concrete mask-bearing template. The dLLM
+        victim fills the masks; a \emph{reward model} scores the result.
+  \item Pattern selection is governed by a \emph{UCB bandit} that trades off
+        exploiting patterns with high empirical reward against exploring
+        rarely-tried ones.
+  \item When the bandit's best pattern fails for a hard goal, a
+        \emph{scorer-guided fallback} drafts a candidate response with a
+        weaker base model, redacts the harmful spans into masks, and feeds
+        the redacted skeleton back to the victim---turning a single
+        adversarial example into a new, goal-specific template.
+  \item Templates that improve on their parent are distilled by a
+        \emph{summarizer} into a new pattern schema and added to the shared
+        registry, so \emph{later goals inherit the templates discovered by
+        earlier goals}.
+\end{itemize}
+
+\paragraph{Why this design.}
+Three observations motivated the specific choices above.
+\textbf{(M1) Pattern-level abstraction beats prompt-level abstraction.}
+Surface-level prompt rewrites (\textsc{ReNeLLM}-style) fail to transfer
+across goals because they overfit to the lexical surface of one harmful
+request. Pattern-level abstraction---``a five-slot procedural list whose
+slots play (goal, premise, step, step, conclusion) roles''---transfers
+because it captures the structural prior the dLLM is willing to complete
+fluently, independent of which goal is being attacked. The library
+therefore grows over goals rather than being thrown away after each goal.
+\textbf{(M2) UCB rather than greedy.} Early in a run, every pattern has
+zero visits and the empirical means are uninformative; greedy selection
+collapses to whichever pattern happened to win first. UCB's $\sqrt{2\ln t/n}$
+exploration term forces the bandit to retry under-visited patterns even
+when one early pattern looks dominant, which we found necessary for
+multi-victim transfer where the ``best'' pattern differs by victim.
+\textbf{(M3) Fallback closes the long tail.} A purely template-driven
+attack hits a hard ceiling on goals whose harmful realization does not
+factor cleanly into the chosen pattern's slot roles. Letting a weaker
+\emph{base} model (no safety alignment, but also no template structure)
+draft a raw response and then \emph{re-introducing} the masks where the
+harmful content lives gives the attacker a goal-conditioned template that
+the bandit alone could not have produced, and is the source of the
+$\sim 15$ percentage-point ASR gap between our system and the strongest
+prior dLLM attack on the hardest behaviour categories.
+
+\paragraph{Scope of contribution.}
+This paper does not propose a new model architecture nor a new defence; it
+provides (1) the first systematic red-team evaluation of five public dLLMs
+across three benchmarks, (2) a search-based attack pipeline (\method) that
+elevates ASR-LLM by $11$--$28$ points absolute over the strongest prior
+dLLM attack on HarmBench / JailbreakBench / StrongReject, (3) a paragraph-mask
+variant (\textsc{Dual100}) suitable for collecting safety-alignment training
+data, and (4) ablations against three published defences (\textsc{A2D},
+\textsc{PO}, system-prompt) showing that the search-based formulation, not
+any single template family, is what drives the gain.

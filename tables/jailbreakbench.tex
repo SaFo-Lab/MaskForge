@@ -1,11 +1,7 @@
 \begin{table}[htb]
 \centering
-\caption{ASR on \textbf{JailbreakBench} across five diffusion LLM victims. For
-each victim we report ASR-K (keyword-based refusal detection on 30 adversarial
-prefixes) and ASR-E (LLM-judge evaluation using Qwen3-235B with the HarmBench
-classifier prompt). Higher is better.}
-\label{tab:attack_results}
-
+\caption{ASR on \textbf{JailbreakBench} across five dLLM victims. HS: Harmscore (1--5, 5 = full policy violation; LLM judge Qwen3-235B via Bedrock with the 5-level OpenAI-policy rubric). ASR-LLM: binary jailbreak rate (\%) judged by Qwen3-235B with the HarmBench-style prompt. For PAIR/ReNeLLM the judge is given their transformed adversarial prompt as the behavior. \method-Search and \method-Dual100 are our methods.}
+\label{tab:jailbreak}
 \resizebox{\linewidth}{!}{
 \begin{tabular}{l *{5}{cc} cc}
 \toprule
@@ -17,21 +13,17 @@ classifier prompt). Higher is better.}
  & \multicolumn{2}{c}{\textbf{MMaDA-CoT}}
  & \multicolumn{2}{c}{\textbf{AVG.}} \\
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}\cmidrule(lr){10-11}\cmidrule(lr){12-13}
- & ASR-K & ASR-E & ASR-K & ASR-E & ASR-K & ASR-E & ASR-K & ASR-E & ASR-K & ASR-E & ASR-K & ASR-E \\
+ & HS & ASR-LLM & HS & ASR-LLM & HS & ASR-LLM & HS & ASR-LLM & HS & ASR-LLM & HS & ASR-LLM \\
 \midrule
-
-\rowcolor{gray!10}
-\multicolumn{13}{c}{\rule{0pt}{2.6ex}\textit{LLM-based Attack Methods}} \\
-PAIR              & 90.0 & 65.0 & 92.0 & 64.0 & 71.0 & 47.0 & 69.0 & 43.0 & 97.0 & 51.0 & 83.8 & 54.0 \\
-ReNeLLM           & 99.0 & 71.0 & 96.0 & 75.0 & 68.0 & 46.0 & 100.0 & 53.0 & 76.0 & 40.0 & 87.8 & 57.0 \\
-\rowcolor{gray!10}
-\multicolumn{13}{c}{\rule{0pt}{2.6ex}\textit{Diffusion-based Attack Methods}} \\
-DIRECT            &  2.0 &  2.0 &  3.0 &  1.0 &  1.9 &  0.6 &  1.0 &  0.0 & 68.0 & 61.0 & 15.2 & 12.9 \\
-PAD               & 49.0 & 68.0 & 41.0 & 68.0 &  7.0 & 12.0 & 57.0 & 73.0 & 86.0 & 89.0 & 48.0 & 62.0 \\
-DIJA              & 59.0 & 72.0 & 55.0 & 64.0 & 35.0 & 31.0 & 88.0 & 78.0 & \textbf{98.0} & 76.0 & 67.0 & 64.2 \\
+DIRECT  & 1.08 &  2.0 & 1.05 &  0.0 & 1.03 &  0.0 & 1.00 &  0.0 & 3.68 & 57.0 & 1.57 & 11.8 \\
+PAD     & 3.99 & 65.0 & 4.11 & 63.0 & 3.20 &  8.0 & 4.21 & 72.0 & 4.55 & 83.0 & 4.01 & 58.2 \\
+DIJA    & 4.48 & 70.0 & 4.29 & 68.0 & 3.34 & 29.0 & 4.44 & 79.0 & 4.36 & 70.0 & 4.18 & 63.2 \\
+PAIR    & 1.31 & 67.0 & 1.29 & 66.0 & 1.26 & 48.0 & 1.39 & 38.0 & 1.35 & 52.0 & 1.32 & 54.2 \\
+ReNeLLM & 2.48 & 71.1 & 2.49 & 72.2 & 1.86 & 45.6 & 2.36 & 48.9 & 1.79 & 34.4 & 2.19 & 54.4 \\
 \rowcolor{gray!20}
-\method (search)  & \textbf{75.0} & \textbf{93.0} & \textbf{76.0} & \textbf{90.0} & \textbf{64.0} & \textbf{77.0} & 86.0 & \textbf{93.0} & 89.0 & \textbf{93.0} & \textbf{78.0} & \textbf{89.2} \\
+\method-Search  & \textbf{4.88} & \textbf{93.0} & \textbf{4.86} & \textbf{91.0} & 4.64 & \textbf{77.0} & \textbf{4.83} & \textbf{93.0} & \textbf{4.88} & \textbf{93.0} & \textbf{4.82} & \textbf{89.4} \\
+\rowcolor{gray!20}
+\method-Dual100 & 4.87 & 85.0 & 4.85 & 81.0 & \textbf{4.86} & \textbf{77.0} & 4.74 & 79.0 & 4.72 & 68.0 & 4.81 & 78.0 \\
 \bottomrule
 \end{tabular}}
-
 \end{table}

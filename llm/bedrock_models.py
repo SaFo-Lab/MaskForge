@@ -246,23 +246,3 @@ class BedrockModel:
         return self._extract_text(response)
 
 
-if __name__ == "__main__":
-    # ---- 方式1: Bearer Token (不污染环境变量) ----
-    model = BedrockModel(
-        model_id="qwen.qwen3-235b-a22b-2507-v1:0",
-        region_name="us-east-2",
-    )
-
-    output = model.generate(
-        system="You are helpful assistant",
-        user="Hello"
-    )
-    print(output)
-
-    # ---- 方式2: 传统 IAM 凭证 (boto3) ----
-    # model = BedrockModel(
-    #     model_id="qwen.qwen3-235b-a22b-2507-v1:0",
-    #     region_name="us-east-2",
-    #     aws_access_key_id="YOUR_ACCESS_KEY",
-    #     aws_secret_access_key="YOUR_SECRET_KEY",
-    # )

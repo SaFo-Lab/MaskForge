@@ -23,6 +23,11 @@ runtime:
   max_iters: 5
   max_length: 2048
   alpha: 1.0
+  ucb_unvisited_prior_count: 32
+  ucb_unvisited_prior_reward: 0.0
+  ucb_bonus_cap: 1.0
+  ucb_selection_pool_size: 3
+  ucb_debug_top_k: 5
   fallback_to_all_patterns: true
   verbose: true
   use_vllm: true

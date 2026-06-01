@@ -3,18 +3,17 @@ import sys
 import json
 import yaml
 import math
-import torch
+import glob
 import hashlib
 from tqdm import tqdm
-from omegaconf import OmegaConf
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
 
 from llm import HuggingFaceModel, BedrockModel
-from framework import Attacker, PatternExtractor, PatternMerger, Summarizer, Scorer, Retriever
-from transformers import AutoTokenizer
-from utils import get_config, preprocess_stage_a_artifacts, get_goal_type, parse_score_result
+from framework import Attacker, PatternExtractor, Summarizer, Scorer, Retriever
+from inference import load_victim, run_victim_online
+from utils import preprocess_stage_a_artifacts, get_goal_type, parse_score_result
 
 
 
@@ -73,16 +72,59 @@ class Pattern:
     source: str = "discovery"
 
 
+_GENERIC_ROLE_NAMES = {
+    "input", "slot", "placeholder", "value", "field", "item",
+    "x", "y", "z", "a", "b", "c",
+}
+_GENERIC_ROLE_RE = __import__("re").compile(
+    r"^(?:input|slot|placeholder|value|field|item|mask|fill)[_\s-]?\d*$",
+    __import__("re").IGNORECASE,
+)
+
+
+def _is_low_quality_schema(schema: Dict[str, Any]) -> Optional[str]:
+    """Return None if the schema is acceptable, else a short reason string.
+
+    Rejects schemas whose slot_roles carry no semantic information — these were
+    produced by a deprecated recovery path that hard-coded
+    ``slot_roles = ["input"] * slot_count`` and ``organization_style = "labeled"``,
+    and they pollute the library because attacker.instantiate has nothing
+    meaningful to condition on.
+    """
+    if not isinstance(schema, dict):
+        return "schema_not_dict"
+    roles = schema.get("slot_roles")
+    if not isinstance(roles, list):
+        return "slot_roles_not_list"
+    slot_count = schema.get("slot_count")
+    if isinstance(slot_count, int) and slot_count > 0 and not roles:
+        return "slot_roles_empty_but_slot_count_positive"
+    if roles:
+        norm = [str(r).strip().lower() for r in roles]
+        if all(_GENERIC_ROLE_RE.fullmatch(r) for r in norm):
+            return "all_slot_roles_generic"
+        if len(set(norm)) == 1 and norm[0] in _GENERIC_ROLE_NAMES:
+            return f"all_slot_roles_identical_generic({norm[0]!r})"
+        if len(roles) >= 4 and len(set(norm)) == 1:
+            return f"all_slot_roles_identical({norm[0]!r})"
+    return None
+
+
 class PatternRegistry:
     def __init__(self) -> None:
         self.patterns: Dict[str, Pattern] = {}
+        self._reject_counts: Dict[str, int] = defaultdict(int)
 
     def add_pattern(
         self,
         schema: Dict[str, Any],
         template: Optional[str] = None,
         source: str = "discovery",
-    ) -> str:
+    ) -> Optional[str]:
+        reason = _is_low_quality_schema(schema)
+        if reason is not None:
+            self._reject_counts[reason] += 1
+            return None
         pattern_id = stable_hash(schema)
         if pattern_id not in self.patterns:
             self.patterns[pattern_id] = Pattern(
@@ -211,6 +253,86 @@ def initialize_stats(registry: PatternRegistry) -> Dict[str, PatternStats]:
     }
 
 
+def load_stats(path: str, registry: PatternRegistry) -> Dict[str, PatternStats]:
+    theta = initialize_stats(registry)
+    if not os.path.exists(path):
+        return theta
+
+    raw = load_json(path)
+    if not isinstance(raw, dict):
+        return theta
+
+    for pid, stat in raw.items():
+        if pid not in theta or not isinstance(stat, dict):
+            continue
+        try:
+            theta[pid] = PatternStats(
+                mean_reward=float(stat.get("mean_reward", 0.0)),
+                visit_count=int(stat.get("visit_count", 0)),
+            )
+        except (TypeError, ValueError):
+            continue
+    return theta
+
+
+def merge_stats(
+    theta: Dict[str, PatternStats],
+    prior: Dict[str, PatternStats],
+) -> Dict[str, PatternStats]:
+    for pid, stat in prior.items():
+        if stat.visit_count <= 0:
+            continue
+        if pid not in theta:
+            theta[pid] = PatternStats()
+        current = theta[pid]
+        total = current.visit_count + stat.visit_count
+        if total <= 0:
+            continue
+        theta[pid] = PatternStats(
+            mean_reward=(
+                current.mean_reward * current.visit_count
+                + stat.mean_reward * stat.visit_count
+            ) / total,
+            visit_count=total,
+        )
+    return theta
+
+
+def stats_to_json(theta: Dict[str, PatternStats]) -> Dict[str, Dict[str, Any]]:
+    return {
+        pid: {
+            "mean_reward": stat.mean_reward,
+            "visit_count": stat.visit_count,
+        }
+        for pid, stat in theta.items()
+    }
+
+
+def count_jsonl_rows(path: str) -> int:
+    if not os.path.exists(path):
+        return 0
+    count = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for _ in f:
+            count += 1
+    return count
+
+
+def load_bootstrap_stats(
+    record_globs: List[str],
+    registry: PatternRegistry,
+) -> Dict[str, PatternStats]:
+    theta = initialize_stats(registry)
+    seen_paths = set()
+    for pattern in record_globs:
+        for records_path in glob.glob(pattern, recursive=True):
+            if records_path in seen_paths or not os.path.isfile(records_path):
+                continue
+            seen_paths.add(records_path)
+            merge_stats(theta, replay_stats_from_records(records_path, registry))
+    return theta
+
+
 def update_stats(
     theta: Dict[str, PatternStats],
     pattern_id: str,
@@ -225,11 +347,50 @@ def update_stats(
     theta[pattern_id].mean_reward = mu + (reward - mu) / n
 
 
+def replay_stats_from_records(
+    records_path: str,
+    registry: PatternRegistry,
+    skip_rows: int = 0,
+) -> Dict[str, PatternStats]:
+    theta = initialize_stats(registry)
+    if not os.path.exists(records_path):
+        return theta
+
+    with open(records_path, "r", encoding="utf-8") as f:
+        for row_idx, line in enumerate(f):
+            if row_idx < skip_rows:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            selected_pid = row.get("selected_pattern_id")
+            if selected_pid in registry.patterns:
+                try:
+                    update_stats(theta, selected_pid, float(row.get("reward", 0.0)))
+                except (TypeError, ValueError):
+                    pass
+
+            new_pid = row.get("new_pattern_id")
+            if new_pid in registry.patterns and row.get("new_reward") is not None:
+                try:
+                    update_stats(theta, new_pid, float(row["new_reward"]))
+                except (TypeError, ValueError):
+                    pass
+    return theta
+
+
 def select_pattern_ucb(
     candidate_ids: List[str],
     theta: Dict[str, PatternStats],
     step_t: int,
     alpha: float,
+    tie_break_key: Optional[str] = None,
+    unvisited_prior_count: int = 0,
+    unvisited_prior_reward: float = 0.0,
+    bonus_cap: Optional[float] = None,
+    selection_pool_size: int = 1,
 ) -> str:
     """
     UCB:
@@ -237,24 +398,131 @@ def select_pattern_ucb(
 
     Unvisited arms are selected first.
     """
-    for pid in candidate_ids:
-        if pid not in theta or theta[pid].visit_count == 0:
-            return pid
+    ordered_candidate_ids = list(candidate_ids)
+    if tie_break_key is not None:
+        ordered_candidate_ids = sorted(
+            ordered_candidate_ids,
+            key=lambda pid: stable_hash({"tie": tie_break_key, "pid": pid}),
+        )
 
-    best_pid = None
-    best_score = -1e18
+    if unvisited_prior_count <= 0:
+        for pid in ordered_candidate_ids:
+            if pid not in theta or theta[pid].visit_count == 0:
+                return pid
 
-    for pid in candidate_ids:
-        mu = theta[pid].mean_reward
-        n = theta[pid].visit_count
-        ucb = mu + alpha * math.sqrt(2.0 * math.log(max(step_t, 2)) / n)
-        if ucb > best_score:
-            best_score = ucb
-            best_pid = pid
+    scored: List[Tuple[str, float, int]] = []
 
-    if best_pid is None:
+    for order, pid in enumerate(ordered_candidate_ids):
+        stat = theta.get(pid, PatternStats())
+        if stat.visit_count <= 0:
+            mu = unvisited_prior_reward
+            n = unvisited_prior_count
+        else:
+            mu = stat.mean_reward
+            n = stat.visit_count
+        bonus = alpha * math.sqrt(2.0 * math.log(max(step_t, 2)) / n)
+        if bonus_cap is not None:
+            bonus = min(bonus, bonus_cap)
+        ucb = mu + bonus
+        scored.append((pid, ucb, order))
+
+    if not scored:
         raise ValueError("No valid pattern selected by UCB.")
-    return best_pid
+
+    scored.sort(key=lambda item: (-item[1], item[2]))
+    pool_size = max(1, int(selection_pool_size))
+    pool = scored[:pool_size]
+    if tie_break_key is not None and pool_size > 1:
+        pool = sorted(
+            pool,
+            key=lambda item: stable_hash({"ucb_pool": tie_break_key, "pid": item[0]}),
+        )
+    return pool[0][0]
+
+
+def describe_ucb_candidates(
+    candidate_ids: List[str],
+    theta: Dict[str, PatternStats],
+    step_t: int,
+    alpha: float,
+    registry: PatternRegistry,
+    top_k: int,
+    tie_break_key: Optional[str] = None,
+    unvisited_prior_count: int = 0,
+    unvisited_prior_reward: float = 0.0,
+    bonus_cap: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    ordered_candidate_ids = list(candidate_ids)
+    if tie_break_key is not None:
+        ordered_candidate_ids = sorted(
+            ordered_candidate_ids,
+            key=lambda pid: stable_hash({"tie": tie_break_key, "pid": pid}),
+        )
+
+    rows = []
+    for order, pid in enumerate(ordered_candidate_ids):
+        stat = theta.get(pid, PatternStats())
+        score_for_sort = float("inf")
+        bonus = None
+        ucb = None
+        effective_visit_count = stat.visit_count
+        effective_mean_reward = stat.mean_reward
+        if stat.visit_count <= 0 and unvisited_prior_count > 0:
+            effective_visit_count = unvisited_prior_count
+            effective_mean_reward = unvisited_prior_reward
+        if effective_visit_count > 0:
+            bonus = alpha * math.sqrt(
+                2.0 * math.log(max(step_t, 2)) / effective_visit_count
+            )
+            if bonus_cap is not None:
+                bonus = min(bonus, bonus_cap)
+            ucb = effective_mean_reward + bonus
+            score_for_sort = ucb
+        schema = registry.get(pid).schema if pid in registry.patterns else {}
+        rows.append({
+            "pattern_id": pid,
+            "source": registry.get(pid).source if pid in registry.patterns else None,
+            "structure_type": schema.get("structure_type"),
+            "visit_count": stat.visit_count,
+            "mean_reward": round(stat.mean_reward, 4),
+            "effective_visit_count": effective_visit_count,
+            "effective_mean_reward": round(effective_mean_reward, 4),
+            "exploration_bonus": None if bonus is None else round(bonus, 4),
+            "ucb_score": None if ucb is None else round(ucb, 4),
+            "unvisited": stat.visit_count <= 0,
+            "_score_for_sort": score_for_sort,
+            "_tie_order": order,
+        })
+
+    rows.sort(key=lambda row: (-row["_score_for_sort"], row["_tie_order"]))
+    for row in rows:
+        row.pop("_score_for_sort", None)
+        row.pop("_tie_order", None)
+    return rows[:top_k]
+
+
+def _record_best_reward(row: Dict[str, Any]) -> float:
+    vals = []
+    for key in ("reward", "new_reward"):
+        if row.get(key) is None:
+            continue
+        try:
+            vals.append(float(row[key]))
+        except (TypeError, ValueError):
+            pass
+    return max(vals) if vals else 0.0
+
+
+def _goal_complete(
+    rows: List[Dict[str, Any]],
+    max_iters: int,
+    success_threshold: float,
+) -> bool:
+    if not rows:
+        return False
+    best = max(_record_best_reward(row) for row in rows)
+    max_iter = max(int(row.get("iteration") or 0) for row in rows)
+    return best >= success_threshold or max_iter >= max_iters or len(rows) >= max_iters
 
 
 def load_stage_a_artifacts(
@@ -272,190 +540,6 @@ def load_stage_a_artifacts(
     return registry, pattern_set
 
 
-def load_victim(victim_config_path: str):
-    config = get_config(victim_config_path)
-
-    victim_model = None
-    victim_tokenizer = None
-
-    pretrained_model = config.model
-    rank = 0
-    torch.cuda.set_device(rank)
-    device = torch.device(f"cuda:{rank}")
-
-    if "llada2" in victim_config_path:
-        from sample.llada2.modeling_llada2_moe import LLaDA2MoeModelLM
-        rank = 0
-
-        victim_model = (
-            LLaDA2MoeModelLM.from_pretrained(
-                pretrained_model,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16,
-            )
-            .to(device)
-            .eval()
-        )
-
-        victim_tokenizer = AutoTokenizer.from_pretrained(
-            pretrained_model,
-            trust_remote_code=True,
-            use_fast=False,
-        )
-
-    elif "dream" in victim_config_path:
-        from sample.dream import DreamTokenizer
-        from sample.dream.modeling_dream import DreamModel
-        from sample.dream.generation_utils_block import DreamGenerationMixin
-        from sample.dream.generation_utils_block import DreamGenerationConfig
-        import types
-
-        victim_model = (DreamModel.from_pretrained(pretrained_model,
-                                                trust_remote_code=True,
-                                                torch_dtype=torch.bfloat16)
-                     .to(device)
-                     .eval())
-        victim_model.diffusion_generate = types.MethodType(DreamGenerationMixin.diffusion_generate, victim_model)
-        victim_model._sample = types.MethodType(DreamGenerationMixin._sample, victim_model)
-        victim_tokenizer = DreamTokenizer.from_pretrained(pretrained_model, trust_remote_code=True)
-
-
-    elif "llada" in victim_config_path or "mmada" in victim_config_path:
-        from sample.llada.modeling_llada import LLaDAModelLM
-
-        victim_model = (LLaDAModelLM
-                     .from_pretrained(pretrained_model,
-                                      trust_remote_code=True,
-                                      torch_dtype=torch.bfloat16)
-                     .to(device)
-                     .eval())
-
-        victim_tokenizer = AutoTokenizer.from_pretrained(pretrained_model, trust_remote_code=True)
-
-
-
-
-
-    return config, victim_model, victim_tokenizer
-
-
-def expand_mask_tokens(text, mask_token="<mask>"):
-    """Convert <mask:N> to N repetitions of the model's native mask token."""
-    import re
-    def replacer(match):
-        n = int(match.group(1))
-        return mask_token * n
-    return re.sub(r"<mask:(\d+)>", replacer, text)
-
-
-def run_victim_online(
-    victim_model,
-    victim_tokenizer,
-    prompt: str,
-    template: str,
-    victim_config_path: str,
-):
-    config = get_config(victim_config_path)
-    rank = 0
-
-    # Select the victim-family-specific native mask token (matches inference.py).
-    # DREAM and LLaDA2 use <|mask|>; LLaDA, LLaDA1.5, MMADA use <|mdm_mask|>.
-    if "dream" in victim_config_path or "llada2" in victim_config_path:
-        native_mask = "<|mask|>"
-    else:
-        native_mask = "<|mdm_mask|>"
-
-    # Expand <mask:N> directly to N copies of native mask token
-    # Also handle plain <mask> (convert to 20 copies of native mask)
-    template = expand_mask_tokens(template, native_mask)
-    template = template.replace("<mask>", native_mask * 20)
-
-    if "llada2" in victim_config_path:
-        from sample.llada2_inference import LLaDA2_Inference, get_new_prompt
-        rank = 0
-        system_prompts = (
-            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-            "<|im_start|>user\n{{problem}} <|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-
-        wrapped_prompt = get_new_prompt(system_prompts, prompt)
-        wrapped_template = template  # already expanded above
-
-        print("="*50)
-        print(wrapped_template)
-
-        seq_dict = {}
-        step_dict = {}
-
-
-        outputs = LLaDA2_Inference(
-            model_gpu=victim_model,
-            tokenizer_gpu=victim_tokenizer,
-            rank=rank,
-            prompts=wrapped_prompt,
-            templates=wrapped_template,
-            orig_idx=None,
-            seq_dict=seq_dict,
-            step_dict=step_dict,
-            batch_size=1,
-            config=config,
-        )
-
-        if not outputs:
-            raise RuntimeError("Victim model returned empty outputs.")
-
-        return outputs[0]
-
-    elif "dream" in victim_config_path:
-        from sample.dream_inference import Dream_Inference, get_new_prompt
-        system_prompts = '''<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{{problem}} <|im_end|>\n<|im_start|>assistant\n'''
-
-        wrapped_prompt = get_new_prompt(system_prompts, prompt)
-        wrapped_template = template  # already expanded above
-
-        seq_dict = {}
-        step_dict = {}
-
-        outputs, _ = Dream_Inference(
-            model_gpu=victim_model,
-            tokenizer_gpu=victim_tokenizer,
-            rank=rank,
-            prompts=wrapped_prompt,
-            templates=wrapped_template,
-            orig_idx=None,
-            seq_dict=seq_dict,
-            step_dict=step_dict,
-            batch_size=1,
-            config=config,
-        )
-
-        return outputs[0]
-
-
-    elif "llada" in victim_config_path or "mmada" in victim_config_path:
-        from sample.llada_inference import LLaDA_Inference, get_new_prompt
-        system_prompts = '''<|startoftext|><|start_header_id|>user<|end_header_id|>{{problem}}<|eot_id|><|startoftext|><|start_header_id|>assistant<|end_header_id|>\n'''
-
-        wrapped_prompt = get_new_prompt(system_prompts, prompt)
-        wrapped_template = template  # already expanded above
-
-        outputs, _ = LLaDA_Inference(
-            model_gpu=victim_model,
-            tokenizer_gpu=victim_tokenizer,
-            rank=rank,
-            prompts=wrapped_prompt,
-            templates=wrapped_template,
-            batch_size=1,
-            config=config,
-        )
-
-        return outputs[0]
-
-
-    raise NotImplementedError(f"Unsupported victim config: {victim_config_path}")
-
-
 def run_expansion(cfg: Dict[str, Any]) -> None:
     model_cfg = cfg["models"]
     data_cfg = cfg["data"]
@@ -463,6 +547,8 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
 
     log_dir = runtime_cfg["log_dir"]
     ensure_dir(log_dir)
+    max_iters = runtime_cfg.get("max_iters", 5)
+    success_threshold = runtime_cfg.get("success_threshold", 1.0)
 
     with open(data_cfg["data_path"], "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -470,6 +556,44 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
     seed_size = data_cfg.get("seed_size", -1)
     if seed_size > 0:
         data = data[seed_size:]
+
+    records_path = os.path.join(log_dir, "expansion_records.jsonl")
+    rows_by_goal: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    if os.path.exists(records_path):
+        with open(records_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                goal_id = row.get("goal_id")
+                if goal_id is not None:
+                    rows_by_goal[goal_id].append(row)
+        done_goal_ids = {
+            goal_id
+            for goal_id, rows in rows_by_goal.items()
+            if _goal_complete(rows, max_iters, success_threshold)
+        }
+        if done_goal_ids:
+            print(f"[expansion] resume: skipping {len(done_goal_ids)} goals already in {records_path}")
+    else:
+        done_goal_ids = set()
+
+    pending_data = []
+    for idx, example in enumerate(data):
+        if "question" not in example:
+            continue
+        if "id" not in example:
+            example = dict(example)
+            example["id"] = f"goal_{idx}"
+        if example["id"] not in done_goal_ids:
+            pending_data.append(example)
+
+    if not pending_data:
+        print("[expansion] resume: all goals already completed; skipping model load.")
+        save_json(os.path.join(log_dir, "config.json"), cfg)
+        return
+    data = pending_data
 
     use_vllm = runtime_cfg.get("use_vllm", True)
 
@@ -493,23 +617,34 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
     victim_config_path = model_cfg["victim_config_path"]
     _, victim_model, victim_tokenizer = load_victim(victim_config_path)
 
-    detection_model_path = model_cfg.get("detection_model_path", None)
-
     # Non-victim roles: attack_model (vLLM heretic) for generation tasks,
     # scorer uses a separate HF model (Qwen3-4B-Instruct) for accurate evaluation.
     # Scorer uses the same instruct model (attack_model)
     scorer_model = attack_model
 
     extractor = PatternExtractor(attack_model)
-    merger = PatternMerger(attack_model)
     summarizer = Summarizer(attack_model)
     scorer = Scorer(scorer_model)
     retriever = Retriever(attack_model)
 
 
+    # Prefer a SHARED registry (persists across runs) if it exists.
+    shared_registry_path = data_cfg.get("shared_registry_path",
+                                        "./logs/shared_pattern_registry.json")
+    shared_pattern_set_path = data_cfg.get("shared_pattern_set_path",
+                                           "./logs/shared_pattern_set.json")
+    if os.path.exists(shared_registry_path):
+        registry_load_path = shared_registry_path
+        pattern_set_load_path = shared_pattern_set_path if os.path.exists(shared_pattern_set_path) else data_cfg.get("init_pattern_set_path", None)
+        print(f"[expansion] loading SHARED registry from {registry_load_path}")
+    else:
+        registry_load_path = data_cfg["init_pattern_registry_path"]
+        pattern_set_load_path = data_cfg.get("init_pattern_set_path", None)
+        print(f"[expansion] loading initial registry from {registry_load_path}")
+
     registry, pattern_set = load_stage_a_artifacts(
-        init_registry_path=data_cfg["init_pattern_registry_path"],
-        init_pattern_set_path=data_cfg.get("init_pattern_set_path", None),
+        init_registry_path=registry_load_path,
+        init_pattern_set_path=pattern_set_load_path,
     )
 
     registry, pattern_set, data, goal_type_mapping = preprocess_stage_a_artifacts(
@@ -520,25 +655,76 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
         verbose=True,
     )
 
+    theta_path = os.path.join(log_dir, "theta.json")
+    shared_theta_path = data_cfg.get("shared_theta_path", "./logs/shared_theta.json")
+    shared_theta_manifest_path = data_cfg.get(
+        "shared_theta_manifest_path",
+        f"{shared_theta_path}.manifest.json",
+    )
+    shared_theta_manifest = {"record_files": {}}
+    if os.path.exists(shared_theta_manifest_path):
+        try:
+            loaded_manifest = load_json(shared_theta_manifest_path)
+            if isinstance(loaded_manifest, dict):
+                shared_theta_manifest = loaded_manifest
+                shared_theta_manifest.setdefault("record_files", {})
+        except Exception as _e:
+            print(f"[expansion] warn: failed to load shared theta manifest: {_e}")
+
     theta = initialize_stats(registry)
+
+    if os.path.exists(shared_theta_path):
+        merge_stats(theta, load_stats(shared_theta_path, registry))
+        print(f"[expansion] loading SHARED theta from {shared_theta_path}")
+    else:
+        bootstrap_globs = data_cfg.get("theta_bootstrap_globs", [])
+        if isinstance(bootstrap_globs, str):
+            bootstrap_globs = [bootstrap_globs]
+        if bootstrap_globs:
+            merge_stats(theta, load_bootstrap_stats(bootstrap_globs, registry))
+            print(f"[expansion] bootstrapped theta from {len(bootstrap_globs)} glob(s)")
+
+    records_abs_path = os.path.abspath(records_path)
+    if os.path.exists(records_path):
+        try:
+            already_shared_rows = int(
+                shared_theta_manifest.get("record_files", {}).get(records_abs_path, 0)
+            )
+        except (TypeError, ValueError):
+            already_shared_rows = 0
+        local_rows = count_jsonl_rows(records_path)
+        merge_stats(
+            theta,
+            replay_stats_from_records(
+                records_path,
+                registry,
+                skip_rows=min(already_shared_rows, local_rows),
+            ),
+        )
+    else:
+        merge_stats(theta, load_stats(theta_path, registry))
     records: List[ExpansionRecord] = []
 
-    max_iters = runtime_cfg.get("max_iters", 5)
     max_length = runtime_cfg.get("max_length", 512)
     alpha = runtime_cfg.get("alpha", 1.0)
+    unvisited_prior_count = int(runtime_cfg.get("ucb_unvisited_prior_count", 32))
+    unvisited_prior_reward = float(runtime_cfg.get("ucb_unvisited_prior_reward", 0.0))
+    bonus_cap_raw = runtime_cfg.get("ucb_bonus_cap", 1.0)
+    ucb_bonus_cap = None if bonus_cap_raw is None else float(bonus_cap_raw)
+    ucb_selection_pool_size = int(runtime_cfg.get("ucb_selection_pool_size", 3))
     verbose = runtime_cfg.get("verbose", False)
     fallback_to_all_patterns = runtime_cfg.get("fallback_to_all_patterns", True)
+    # ablation knobs
+    ucb_strategy = runtime_cfg.get("ucb_strategy", "ucb")  # "ucb" | "random"
+    no_evolution = bool(runtime_cfg.get("no_evolution", False))
 
     for idx, example in tqdm(
         enumerate(data),
         total=len(data),
         desc="Stage B Expansion",
     ):
-        if "question" not in example:
-            continue
-
         goal = example["question"]
-        goal_id = example.get("id", f"goal_{idx}")
+        goal_id = example["id"]
         print(f"[progress] {idx+1}/{len(data)} goal_id={goal_id}", flush=True)
         goal_type = get_goal_type(goal, retriever, list(pattern_set.keys()))
 
@@ -565,13 +751,51 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
         prev_template: Optional[str] = None
         prev_reward: Optional[float] = None
 
-        for t in range(1, max_iters + 1):
-            selected_pattern_id = select_pattern_ucb(
-                candidate_ids=candidate_ids,
-                theta=theta,
-                step_t=t,
-                alpha=alpha,
+        existing_attempts = min(len(rows_by_goal.get(goal_id, [])), max_iters)
+        for t in range(existing_attempts + 1, max_iters + 1):
+            ucb_step_t = 1 + sum(
+                theta.get(pid, PatternStats()).visit_count
+                for pid in candidate_ids
             )
+            ucb_tie_break_key = f"{goal_id}:{t}"
+            ucb_debug_top_k = int(runtime_cfg.get("ucb_debug_top_k", 5))
+            if ucb_debug_top_k > 0:
+                print(
+                    "[UCB] top candidates: "
+                    + json.dumps(
+                        describe_ucb_candidates(
+                            candidate_ids=candidate_ids,
+                            theta=theta,
+                            step_t=ucb_step_t,
+                            alpha=alpha,
+                            registry=registry,
+                            top_k=ucb_debug_top_k,
+                            tie_break_key=ucb_tie_break_key,
+                            unvisited_prior_count=unvisited_prior_count,
+                            unvisited_prior_reward=unvisited_prior_reward,
+                            bonus_cap=ucb_bonus_cap,
+                        ),
+                        ensure_ascii=False,
+                    )
+                )
+            if ucb_strategy == "random":
+                # Ablation: ignore UCB, sample uniformly from the candidate pool.
+                # Deterministic per-(goal, iter) via stable_hash so the experiment
+                # is reproducible.
+                _idx = int(stable_hash({"rand": ucb_tie_break_key}), 16) % len(candidate_ids)
+                selected_pattern_id = list(candidate_ids)[_idx]
+            else:
+                selected_pattern_id = select_pattern_ucb(
+                    candidate_ids=candidate_ids,
+                    theta=theta,
+                    step_t=ucb_step_t,
+                    alpha=alpha,
+                    tie_break_key=ucb_tie_break_key,
+                    unvisited_prior_count=unvisited_prior_count,
+                    unvisited_prior_reward=unvisited_prior_reward,
+                    bonus_cap=ucb_bonus_cap,
+                    selection_pool_size=ucb_selection_pool_size,
+                )
             selected_pattern = registry.get(selected_pattern_id)
 
             print("="*25 + str(t) + "="*25)
@@ -680,7 +904,8 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
             )
 
             if (
-                t >= 2
+                not no_evolution
+                and t >= 2
                 and prev_reward is not None
                 and reward >= prev_reward
                 and prev_selected_pattern_schema is not None
@@ -704,6 +929,18 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
                 if not new_schema or not new_schema.get("structure_type"):
                     new_schema = extractor.extract(new_template)
 
+                # Ensure new patterns carry their goal_type into the schema, so
+                # that when preprocess_stage_a_artifacts later rebuilds
+                # pattern_set from the persisted registry, the pattern is not
+                # orphaned. Without this, summarizer/extractor outputs typically
+                # lack a goal_type field and end up in no bucket.
+                existing_gt = new_schema.get("goal_type", [])
+                if isinstance(existing_gt, str):
+                    existing_gt = [existing_gt]
+                if goal_type and goal_type not in existing_gt:
+                    existing_gt.append(goal_type)
+                new_schema["goal_type"] = existing_gt
+
                 new_pattern_id = stable_hash(new_schema)
 
                 is_new = new_pattern_id not in registry.patterns
@@ -714,6 +951,7 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
                         source="expansion",
                     )
 
+                if new_pattern_id is not None and is_new:
                     if goal_type not in pattern_set:
                         pattern_set[goal_type] = []
 
@@ -729,6 +967,14 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
                         candidate_ids = _base + _extras
                     else:
                         candidate_ids = _base
+
+                    # Persist growing registry + pattern_set across runs.
+                    try:
+                        os.makedirs(os.path.dirname(shared_registry_path) or ".", exist_ok=True)
+                        save_json(shared_registry_path, registry.to_json())
+                        save_json(shared_pattern_set_path, pattern_set)
+                    except Exception as _e:
+                        print(f"[expansion] warn: failed to persist shared registry: {_e}")
 
 
                 output = run_victim_online(
@@ -756,7 +1002,7 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
 
             records.append(record)
 
-            with open(os.path.join(log_dir, "expansion_records.jsonl"), "a", encoding="utf-8") as _rf:
+            with open(records_path, "a", encoding="utf-8") as _rf:
                 _rf.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
 
             prev_selected_pattern_id = selected_pattern_id
@@ -764,7 +1010,6 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
             prev_template = template
             prev_reward = reward
 
-            success_threshold = runtime_cfg.get("success_threshold", 1.0)
             best_reward = max(reward, record.new_reward if record.improvement_written else reward)
             if best_reward >= success_threshold:
                 print(f"[EarlyStop] goal={goal_id} iter={t} reward={best_reward:.4f} >= {success_threshold}, stopping exploration.")
@@ -784,18 +1029,22 @@ def run_expansion(cfg: Dict[str, Any]) -> None:
                         f"new_reward={record.new_reward:.4f}"
                     )
 
-    theta_json = {
-        pid: {
-            "mean_reward": stat.mean_reward,
-            "visit_count": stat.visit_count,
-        }
-        for pid, stat in theta.items()
-    }
+    theta_json = stats_to_json(theta)
 
     save_json(os.path.join(log_dir, "config.json"), cfg)
     save_json(os.path.join(log_dir, "pattern_registry.json"), registry.to_json())
     save_json(os.path.join(log_dir, "pattern_set.json"), pattern_set)
     save_json(os.path.join(log_dir, "theta.json"), theta_json)
+    if runtime_cfg.get("save_shared_theta", True):
+        try:
+            os.makedirs(os.path.dirname(shared_theta_path) or ".", exist_ok=True)
+            save_json(shared_theta_path, theta_json)
+            shared_theta_manifest.setdefault("record_files", {})
+            if os.path.exists(records_path):
+                shared_theta_manifest["record_files"][records_abs_path] = count_jsonl_rows(records_path)
+            save_json(shared_theta_manifest_path, shared_theta_manifest)
+        except Exception as _e:
+            print(f"[expansion] warn: failed to persist shared theta: {_e}")
     # NOTE: skip the "w"-mode final save; incremental append inside the loop
     # is the authoritative records file. Rewriting with only this session's
     # in-memory `records` would clobber earlier resume-state records.

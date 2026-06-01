@@ -18,8 +18,8 @@ execute:
 rollout:
     num_response_per_task: 3
     temperature: 0.2
-    steps: 512 # total steps of unmasking
-    max_gen_length: 512
+    steps: 256 # total steps of unmasking (downscaled from 512 for ablation throughput)
+    max_gen_length: 256
     batch_size: 2
     remasking_strategy: "low_confidence_dynamic" #"low_confidence_static""low_confidence_dynamic"
     target: "confidence" # target to decide which tokens to unmask, eg. confidence, margin_confidence and neg_entropy

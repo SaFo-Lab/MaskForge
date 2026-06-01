@@ -1,17 +1,26 @@
 __pycache__/
 *.pyc
 *.pyo
-logs/
 *.log
 *.tmp
 /tmp/
 .vscode/
 .idea/
+.claude/
 .DS_Store
 
-# large runtime artefacts
+# large runtime artefacts symlinked into scratch
+/logs
+/results
+/final_results
 *.pkl
 *.pt
+
+# generated paper figures (rebuilt from papers/_plot_*.py)
+papers/*.pdf
+papers/*.png
+papers/method_walkthrough/*.pdf
+papers/method_walkthrough/*.png
 
 # credentials
 *.token

@@ -7,7 +7,7 @@ class VLLMServerModel:
     def __init__(self, base_url: str, model_name: str):
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
-        print(f"VLLMServerModel connected: {base_url} ({model_name})")
+        print(f"VLLMServerModel configured: {base_url} ({model_name})")
 
     def generate(self, system: str, user: str, max_length: int = 2000, **kwargs):
         messages = [
@@ -75,10 +75,13 @@ class VLLMServerModel:
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["text"]
-        except requests.exceptions.HTTPError as e:
-            print(f"[VLLMServerModel] Completions API error: {e}")
-            print(f"[VLLMServerModel] Response: {resp.text[:500]}")
-            return ""
+        except requests.exceptions.RequestException as e:
+            response_text = getattr(getattr(e, "response", None), "text", "")
+            if response_text:
+                response_text = f" Response: {response_text[:500]}"
+            raise RuntimeError(
+                f"vLLM completions request failed for {self.base_url}: {e}.{response_text}"
+            ) from e
 
     def _chat(self, messages, max_length, **kwargs):
         # Filter out empty messages and ensure valid format
@@ -106,7 +109,10 @@ class VLLMServerModel:
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]
-        except requests.exceptions.HTTPError as e:
-            print(f"[VLLMServerModel] Chat API error: {e}")
-            print(f"[VLLMServerModel] Response: {resp.text[:500]}")
-            return ""
+        except requests.exceptions.RequestException as e:
+            response_text = getattr(getattr(e, "response", None), "text", "")
+            if response_text:
+                response_text = f" Response: {response_text[:500]}"
+            raise RuntimeError(
+                f"vLLM chat request failed for {self.base_url}: {e}.{response_text}"
+            ) from e

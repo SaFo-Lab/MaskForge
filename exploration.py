@@ -142,6 +142,8 @@ def build_pattern_set(registry: PatternRegistry) -> Dict[str, List[str]]:
     for pattern_id in registry.ids():
         schema = registry.get(pattern_id).schema
         goal_types = schema.get("goal_type", [])
+        if isinstance(goal_types, str):
+            goal_types = [goal_types]
         for goal_type in goal_types:
             pattern_set[goal_type].append(pattern_id)
     return dict(pattern_set)
@@ -162,25 +164,60 @@ def run_exploration(cfg: Dict[str, Any]) -> None:
     if seed_size > 0:
         data = data[:seed_size]
 
-    attacker, attack_model = load_attacker(
-        attack_model_path=model_cfg["attack_model_path"],
-        weaker_model_path=model_cfg["attack_weaker_model_path"],
-    )
+    use_vllm = runtime_cfg.get("use_vllm", False)
+    if use_vllm:
+        from llm import VLLMServerModel
+        instruct_port = runtime_cfg.get("vllm_instruct_port", 8100)
+        base_port = runtime_cfg.get("vllm_base_port", 8101)
+        attack_model = VLLMServerModel(
+            f"http://localhost:{instruct_port}",
+            model_cfg["attack_model_path"],
+        )
+        weaker_model = VLLMServerModel(
+            f"http://localhost:{base_port}",
+            model_cfg["attack_weaker_model_path"],
+        )
+        attacker = Attacker(
+            attack_model,
+            template_library=[],
+            weaker_model=weaker_model,
+        )
+    else:
+        attacker, attack_model = load_attacker(
+            attack_model_path=model_cfg["attack_model_path"],
+            weaker_model_path=model_cfg["attack_weaker_model_path"],
+        )
 
     shared_models: Dict[str, Any] = {}
 
-    extractor_model = resolve_model(
-        target_model_path=model_cfg["extractor_model_path"],
-        attack_model_path=model_cfg["attack_model_path"],
-        attack_model=attack_model,
-        shared_models=shared_models,
-    )
-    merger_model = resolve_model(
-        target_model_path=model_cfg["merger_model_path"],
-        attack_model_path=model_cfg["attack_model_path"],
-        attack_model=attack_model,
-        shared_models=shared_models,
-    )
+    if use_vllm:
+        def resolve_server_model(target_model_path: str):
+            if target_model_path == model_cfg["attack_model_path"]:
+                return attack_model
+            if target_model_path in shared_models:
+                return shared_models[target_model_path]
+            model = VLLMServerModel(
+                f"http://localhost:{runtime_cfg.get('vllm_instruct_port', 8100)}",
+                target_model_path,
+            )
+            shared_models[target_model_path] = model
+            return model
+
+        extractor_model = resolve_server_model(model_cfg["extractor_model_path"])
+        merger_model = resolve_server_model(model_cfg["merger_model_path"])
+    else:
+        extractor_model = resolve_model(
+            target_model_path=model_cfg["extractor_model_path"],
+            attack_model_path=model_cfg["attack_model_path"],
+            attack_model=attack_model,
+            shared_models=shared_models,
+        )
+        merger_model = resolve_model(
+            target_model_path=model_cfg["merger_model_path"],
+            attack_model_path=model_cfg["attack_model_path"],
+            attack_model=attack_model,
+            shared_models=shared_models,
+        )
 
     extractor = PatternExtractor(extractor_model)
     merger = PatternMerger(merger_model)

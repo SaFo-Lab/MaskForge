@@ -1,0 +1,248 @@
+% !TEX root = main.tex
+% Method section for the Attack4dLLM paper.
+% Required preamble:
+%   \usepackage{algorithm}
+%   \usepackage{algpseudocode}
+%   \usepackage{amsmath,amssymb,bm}
+%   \newcommand{\method}{\textsc{Search}\xspace}
+%   \newcommand{\dual}{\textsc{Dual100}\xspace}
+%   \newcommand{\maskTok}{\langle\textsc{mask}\!:\!N\rangle}
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem setup and notation}
+\label{sec:method:setup}
+
+Let $g$ denote a harmful \emph{goal} drawn from a benchmark
+$\mathcal{G}=\{g_1,\dots,g_{|\mathcal{G}|}\}$ (HarmBench, JailbreakBench, or
+StrongReject). Let $V_\theta$ denote a diffusion LLM victim that, given a
+prompt $p$ and a mask-bearing template $\tau$ containing $K$ masked spans,
+produces a completion $V_\theta(p,\tau)\in\Sigma^*$ by parallel iterative
+denoising. A \emph{template} is a string of the form
+$\tau = u_0\,\maskTok_{\!1}\,u_1\,\maskTok_{\!2}\,\dots\,\maskTok_{\!K}\,u_K$
+where each $u_j$ is non-mask text and each $\maskTok_{\!j}$ is later expanded
+to a victim-specific number of native mask tokens (e.g. $\langle\,$\verb|mask|$\,\rangle$
+for \llada\,2 / Dream, $\langle\,$\verb|mdm_mask|$\,\rangle$ for
+\llada\,/\llada\,1.5\,/\mmada). A \emph{judge} $J$ assigns a binary success
+label and a $0$-$5$ harmscore to the pair $(g,V_\theta(p,\tau))$.
+
+A \emph{pattern} $\pi$ is a structural schema
+$\pi=(\textsf{type},\textsf{org},K,\bm{r},\mathcal{T})$ specifying the
+template's structure type (e.g.\ procedural-steps, narrative-arc, worked-example),
+organization style, slot count $K$, slot-role vector
+$\bm{r}=(r_1,\dots,r_K)$, and a set $\mathcal{T}$ of goal-type tags
+indicating which categories of $g$ this pattern is suited to.
+$\Pi_t$ denotes the \emph{pattern registry} (library) at iteration $t$;
+$\Pi_0$ is initialized in Stage~A (Section~\ref{sec:method:exploration}) and
+grows monotonically as new patterns are distilled (Section~\ref{sec:method:evolution}).
+
+\subsection{Architecture overview}
+\label{sec:method:overview}
+
+The pipeline (Fig.~\ref{fig:pipeline}, Algorithm~\ref{alg:expansion}) is a
+two-stage system.
+\textbf{Stage~A (offline, run once).} A small bootstrap set of harmful goals is
+fed to the attacker LLM with a generic ``produce a mask-bearing template''
+instruction; the resulting templates are abstracted into pattern schemas,
+deduplicated by stable hashing, and written to the shared registry on disk.
+\textbf{Stage~B (online, the core loop).} For each new goal $g$, a UCB bandit
+selects a pattern from $\Pi_t$, the attacker instantiates a concrete template,
+the dLLM victim fills the masks, and the scorer assigns a reward. Low-reward
+attempts trigger a base-model fallback; high-reward attempts that improve on
+the previous iteration trigger pattern distillation. Both events update
+$\Pi_t\!\to\!\Pi_{t+1}$, so attack effort spent on goal $g_i$ benefits goal
+$g_{i+1}$.
+
+We instantiate four roles with three distinct LLMs:
+the \emph{attacker} and \emph{scorer} use Qwen3-4B-Instruct served via vLLM;
+the \emph{weaker base model} (used only inside the fallback) is the
+unaligned Qwen3-4B-Base; the optional \emph{tagger} for the fallback's
+redaction step is Qwen3-235B served via AWS Bedrock (with a local
+Qwen3-4B-Instruct fallback when Bedrock is unavailable).
+
+\subsection{Stage A: exploration}
+\label{sec:method:exploration}
+
+Given a bootstrap set $\mathcal{G}_0\subset\mathcal{G}$ of $|\mathcal{G}_0|=150$
+goals, we elicit one mask-bearing template per goal from the attacker.
+Each template is run through an \emph{extractor} (a single LLM call) that
+returns the schema $\pi$. Patterns are keyed by
+$\textsf{id}(\pi)=\textsc{Hash}(\pi)$ so semantically equivalent
+schemas collapse to the same registry entry. The result is a starting
+library $\Pi_0$ of $\sim 30$--$50$ unique patterns, persisted to
+\verb|logs/shared_pattern_registry.json|.
+
+\subsection{Stage B: UCB-guided online search}
+\label{sec:method:expansion}
+
+For each goal $g$ we run $T=\mathtt{max\_iters}$ iterations
+(Algorithm~\ref{alg:expansion}). At iteration $t$ we:
+\begin{enumerate}
+\itemsep0pt
+\item \textbf{Filter the registry by goal type.} A retriever (one LLM call)
+      maps $g$ to one or more goal-type tags
+      $\mathcal{T}(g)\subseteq\{\text{cybercrime,harassment,\ldots}\}$ and we
+      keep $\Pi_t(g)=\{\pi\in\Pi_t:\mathcal{T}(g)\cap\mathcal{T}_\pi\neq\emptyset\}$.
+\item \textbf{UCB selection.} For each $\pi\in\Pi_t(g)$ we maintain
+      $(\hat\mu_\pi,n_\pi)$ (running mean reward, visit count). Unvisited
+      patterns are selected first; otherwise we pick
+      \begin{equation}
+      \pi^\star_t \;=\; \argmax_{\pi\in\Pi_t(g)}\;
+        \hat\mu_\pi + \alpha \sqrt{\frac{2\ln t}{n_\pi}},
+      \qquad \alpha=1.0.
+      \label{eq:ucb}
+      \end{equation}
+\item \textbf{Attacker.instantiate.} A \emph{single} LLM call to the attacker,
+      conditioned on $g$ and $\pi^\star_t$, emits a four-part response:
+      a strategy tag, a jailbreak prompt $p$, and a $K_\pi$-slot template
+      $\tau$ (with one continuation example used only for self-supervision).
+      We post-process $\tau$ via \textsc{RescaleMasks} so that the total
+      number of native mask tokens hits a target ratio of the victim's
+      \texttt{max\_gen\_length}: $\sim 13$ tokens$\times 7$ slots
+      ($\approx\!36\%$) for \method, $\sim 55$ tokens$\times 5$ slots
+      ($\approx\!64\%$) for \dual.
+\item \textbf{Victim infill.} We dispatch to the appropriate
+      \texttt{sample/} backend by victim, expand $\maskTok$ into the
+      victim's native mask token, and decode in parallel for
+      \texttt{steps} denoising iterations to obtain
+      $y_t = V_\theta(p,\tau)$.
+\item \textbf{Scorer.} A single LLM call returns
+      $r_t\in\{0,1\}$ along with a short evidence string and an
+      analysis used for fallback feedback.
+\item \textbf{Fallback (only if $r_t<\rho$).} With $\rho=0.7$ and at most
+      $R=5$ retries we run Algorithm~\ref{alg:fallback}; if any retry
+      improves on the current $r_t$ we adopt that $(\tau,y)$ pair.
+\item \textbf{Bandit update.} $n_{\pi^\star_t}\!\leftarrow n_{\pi^\star_t}+1$;
+      $\hat\mu_{\pi^\star_t}\!\leftarrow
+       \hat\mu_{\pi^\star_t}+(r_t-\hat\mu_{\pi^\star_t})/n_{\pi^\star_t}$.
+\item \textbf{Pattern evolution.} If $t\!\ge\!2$ and $r_t\!\ge\!r_{t-1}$ we run
+      the summarizer (Section~\ref{sec:method:evolution}); the resulting
+      schema--template pair is added to $\Pi_{t+1}$ if its hash is new.
+\end{enumerate}
+
+\begin{algorithm}[t]
+\caption{\method: per-goal UCB attack loop (Stage~B).}
+\label{alg:expansion}
+\begin{algorithmic}[1]
+\Require goal $g$, registry $\Pi_t$, attacker $A$, victim $V_\theta$, scorer $S$,
+         summarizer $\Sigma$, extractor $E$, hyperparameters $T,\alpha,\rho,R$
+\State $\Pi_t(g)\leftarrow\textsc{FilterByGoalType}(\Pi_t,g)$
+\State $\theta\leftarrow\{(\hat\mu_\pi=0,n_\pi=0):\pi\in\Pi_t(g)\}$
+\State $(\pi_{\text{prev}},\tau_{\text{prev}},r_{\text{prev}})\leftarrow(\bot,\bot,\bot)$
+\For{$t=1,\dots,T$}
+  \State $\pi^\star\leftarrow\textsc{SelectUCB}(\Pi_t(g),\theta,t,\alpha)$ \Comment{Eq.~\ref{eq:ucb}}
+  \State $(p,\tau)\leftarrow A.\textsc{Instantiate}(g,\pi^\star)$
+  \State $y\leftarrow V_\theta(p,\tau)$
+  \State $r\leftarrow S.\textsc{Score}(g,p,\tau,y)$
+  \If{$r<\rho$}
+    \State $(\tau,y,r)\leftarrow\textsc{Fallback}(g,\pi^\star,r,R)$ \Comment{Algorithm~\ref{alg:fallback}}
+  \EndIf
+  \State $\textsc{UpdateUCB}(\theta,\pi^\star,r)$
+  \If{$t\ge 2 \;\land\; r\ge r_{\text{prev}}$}
+    \State $(\tilde\tau,\tilde\pi)\leftarrow\Sigma.\textsc{Distill}(\pi_{\text{prev}},\tau_{\text{prev}},r_{\text{prev}},\pi^\star,\tau,r)$
+    \If{$\tilde\pi$ has empty schema} $\tilde\pi\leftarrow E.\textsc{Extract}(\tilde\tau)$ \EndIf
+    \If{$\textsc{Hash}(\tilde\pi)\notin\Pi_t$} $\Pi_t\leftarrow\Pi_t\cup\{(\tilde\pi,\tilde\tau)\}$ \EndIf
+  \EndIf
+  \State $(\pi_{\text{prev}},\tau_{\text{prev}},r_{\text{prev}})\leftarrow(\pi^\star,\tau,r)$
+\EndFor
+\State \Return $\arg\max_{(\tau,y,r)\text{ seen}} r$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Scorer-guided fallback}
+\label{sec:method:fallback}
+
+The fallback (Algorithm~\ref{alg:fallback}) is the mechanism by which the
+attack escapes pattern-level dead ends. Its key idea is that an unaligned
+\emph{base} model can fluently write content that an aligned attacker cannot,
+but base outputs are not directly usable as templates because they contain
+no masks. We therefore (i) draft a raw response, (ii) tag the
+goal-realizing spans with a stronger model, and (iii) convert tags to masks
+to yield a goal-specific template that the dLLM victim is then asked to
+re-fill itself. Concretely:
+
+\begin{algorithm}[t]
+\caption{\textsc{Fallback}: scorer-guided template repair.}
+\label{alg:fallback}
+\begin{algorithmic}[1]
+\Require goal $g$, current pattern $\pi$, current best reward $r$, retries $R$
+\State $\textit{feedback}\leftarrow\text{scorer's last analysis (truncated to 600 chars)}$
+\For{$i=1,\dots,R$}
+  \State $\tilde g\leftarrow A.\textsc{RephraseGoal}(g,\textit{framing}_i)$
+         \Comment{rotates over: direct, narrative, tutorial, imperative, worked-example}
+  \State $z\leftarrow A_{\text{base}}.\textsc{Continue}(\tilde g)$
+         \Comment{weaker, unaligned base model}
+  \State $z^{\text{tagged}}\leftarrow A_{235\text{B}}.\textsc{TagSpans}(g,z)$
+         \Comment{wraps goal-realizing spans in $[\textsc{redact}]\cdots[/\textsc{redact}]$}
+  \State $\tau'\leftarrow\textsc{TagsToMasks}(z^{\text{tagged}})$
+  \State $y'\leftarrow V_\theta(p,\tau')$;\quad
+         $r'\leftarrow S.\textsc{Score}(g,p,\tau',y')$
+  \If{$r'>r$} $(\tau,y,r)\leftarrow(\tau',y',r')$;\;\;
+         $\textit{feedback}\leftarrow$ scorer's new analysis
+  \EndIf
+  \If{$r\ge\rho$} \textbf{break} \EndIf
+\EndFor
+\State \Return $(\tau,y,r)$
+\end{algorithmic}
+\end{algorithm}
+
+Two design points are worth flagging.
+\textbf{(F1) Goal rephrasing rotates framings.} Calling the base model on the
+literal goal often hits its residual safety training; rotating the framing
+(narrative, tutorial, imperative, worked-example) produces stylistically
+distinct continuations and gives the bandit a richer set of candidate
+templates without the attacker LLM having to ``know'' which framing the
+victim will accept.
+\textbf{(F2) Tagging happens with a stronger model than drafting.} The
+draft model needs fluency, not judgement; the tagger needs judgement, not
+generation breadth. Splitting the two roles and routing the second to
+Qwen3-235B (or a local instruct fallback) yields cleaner mask placement
+than asking a single model to do both.
+
+\subsection{Pattern evolution (summarizer)}
+\label{sec:method:evolution}
+
+When iteration $t$ improves on iteration $t-1$ for the same goal,
+the summarizer is given both $(\pi_{t-1},\tau_{t-1},r_{t-1})$ and
+$(\pi_t,\tau_t,r_t)$ and asked, in a single LLM call, to produce a
+\emph{new} schema--template pair $(\tilde\pi,\tilde\tau)$ that captures
+what made the second attempt better. If the returned schema is malformed
+we re-extract from $\tilde\tau$ via the extractor used in Stage~A. The
+pair is added to $\Pi_t$ keyed by $\textsc{Hash}(\tilde\pi)$, so duplicates
+collapse. Patterns therefore have three provenances:
+\textsc{exploration} (Stage~A), \textsc{expansion} (Stage~B distillation),
+and \textsc{fallback} (templates promoted out of Algorithm~\ref{alg:fallback}
+when they win their iteration). The registry is shared across goals and
+benchmarks but partitioned by victim, so transfer happens \emph{within} a
+victim only.
+
+\subsection{The \dual variant}
+\label{sec:method:dual100}
+
+\dual differs from \method only in two hyperparameters. (1) Mask granularity:
+\dual emits $K{=}5$ paragraph-sized slots ($\sim 55$ native mask tokens each)
+versus \method's $K{=}7$ entity-sized slots ($\sim 13$ tokens each). (2)
+Attacker contribution: because \dual's slots are larger, the victim
+generates $\approx 64\%$ of the final tokens versus $\approx 36\%$ for
+\method. The two variants share Algorithm~\ref{alg:expansion},
+Algorithm~\ref{alg:fallback}, the registry, and all other hyperparameters.
+\dual is the variant intended for collecting safety-alignment training
+data, since the victim's contribution dominates the final output and is
+therefore informative as a model-specific failure mode; \method is the
+variant intended for adversarial robustness benchmarking, where having the
+attacker write more of the surface text yields a stricter test of whether
+the victim's safety alignment generalizes off-distribution.
+
+\subsection{Hyperparameters and compute}
+\label{sec:method:hparams}
+
+Unless stated otherwise we use $T=5$, $\alpha=1.0$, $\rho=0.7$, $R=5$,
+$|\mathcal{G}_0|=150$, attacker temperature $0.7$, scorer temperature $0.0$,
+and victim \texttt{steps} matching each model's released default
+($256$ for \llada\,2, $128$ for \llada/\llada\,1.5/\mmada, $256$ for Dream).
+A full run on $100$ goals against one victim costs roughly
+$100\!\times\!T\!\times\!(1\!+\!\bar R)$ attacker LLM calls (where
+$\bar R\!\approx\!1.4$ is the empirical average fallback retry count) plus
+the same number of victim denoising passes; on a single H100 this is
+$\sim 6$--$9$ wall-clock hours per (victim, benchmark) pair.

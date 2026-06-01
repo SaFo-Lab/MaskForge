@@ -1,0 +1,56 @@
+\begin{table}[htb]
+\centering
+\caption{\textbf{Transferability on AdvBench (100 prompts).} The pattern library is learned via expansion on JailbreakBench / HarmBench / StrongReject and then applied to AdvBench \emph{by pure retrieval} -- the only LLM call at attack time is the victim itself. For each goal we sample $k$ patterns; the goal counts as jailbroken if any of the $k$ attempts is judged unsafe; HS reports the best-of-$k$ Harmscore. \textsc{MaskForge}-Random samples uniformly from the goal-type bucket; \textsc{MaskForge}-Embed retrieves the $k$ patterns with highest BGE cosine similarity to the goal. Both ASR and HS are evaluated with Bedrock Qwen3-235B. Higher is better.}
+\label{tab:transition_advbench}
+
+\resizebox{\linewidth}{!}{
+\begin{tabular}{C{3.0cm}|*{12}{C{0.8cm}}}
+\toprule
+
+\multirow{2}{*}{\textbf{Attack $\downarrow$ / Victims $\rightarrow$}}
+& \multicolumn{2}{c}{\textbf{LLaDA-Instruct}}
+& \multicolumn{2}{c}{\textbf{LLaDA 1.5}}
+& \multicolumn{2}{c}{\textbf{LLaDA2.0-mini}}
+& \multicolumn{2}{c}{\textbf{Dream-Instruct}}
+& \multicolumn{2}{c}{\textbf{MMaDA-CoT}}
+& \multicolumn{2}{c}{\textbf{AVG.}} \\
+
+\cmidrule(lr){2-3}
+\cmidrule(lr){4-5}
+\cmidrule(lr){6-7}
+\cmidrule(lr){8-9}
+\cmidrule(lr){10-11}
+\cmidrule(lr){12-13}
+
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS}
+& \textbf{ASR} & \textbf{HS} \\
+
+\midrule
+
+DIRECT  &  0.0 & 1.00 &  0.0 & 1.00 &  0.0 & 1.00 &  0.0 & 1.00 & 62.0 & 4.23 & 12.4 & 1.65 \\
+PAD     & 56.0 & 4.22 & 59.0 & 4.20 &  9.0 & 2.96 & 64.0 & 4.34 & 76.0 & 4.66 & 52.8 & 4.08 \\
+DIJA    & 58.0 & 4.18 & 55.0 & 4.17 & 15.0 & 3.25 & 62.0 & 4.28 & 63.0 & 4.37 & 50.6 & 4.05 \\
+
+\midrule
+\rowcolor{gray!10}
+\multicolumn{13}{c}{\rule{0pt}{2.4ex}\textit{MaskForge-Random (ours, uniform within goal-type bucket)}} \\
+
+MaskForge-Rand ($k{=}1$)          & 39.0 & 3.57 & 25.0 & 3.22 & 18.0 & 3.02 & 20.0 & 2.54 & 60.0 & 4.32 & 30.8 & 3.33 \\
+MaskForge-Rand ($k{=}3$)          & 58.0 & 4.58 & 49.0 & 4.29 & 38.0 & 4.12 & 53.0 & 3.86 & 88.0 & 4.86 & 57.2 & 4.34 \\
+MaskForge-Rand ($k{=}5$)          & 74.0 & 4.78 & 61.0 & 4.69 & 47.0 & 4.57 & 70.0 & 4.37 & 95.0 & 4.96 & 69.4 & 4.67 \\
+
+\midrule
+\rowcolor{yellow!15}
+\multicolumn{13}{c}{\rule{0pt}{2.4ex}\textit{MaskForge-Embed (ours, BGE-large cosine top-K)}} \\
+
+MaskForge-Embed ($k{=}1$)         & 66.0 & 3.92 & 57.0 & 3.86 & 32.0 & 3.50 & 60.0 & 3.66 & 82.0 & 4.62 & 59.4 & 3.91 \\
+MaskForge-Embed ($k{=}3$)         & 82.0 & 4.66 & 81.0 & 4.60 & 64.0 & 4.51 & 82.0 & 4.50 & 96.0 & 4.98 & 81.0 & 4.65 \\
+\textbf{MaskForge-Embed ($k{=}5$)} & \textbf{88.0} & \textbf{4.87} & \textbf{91.0} & \textbf{4.84} & \textbf{74.0} & \textbf{4.89} & \textbf{90.0} & \textbf{4.81} & \textbf{98.0} & \textbf{5.00} & \textbf{88.2} & \textbf{4.88} \\
+
+\bottomrule
+\end{tabular}}
+\end{table}

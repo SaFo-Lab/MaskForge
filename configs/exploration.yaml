@@ -1,7 +1,7 @@
 stage: exploration
 
 models:
-  attack_model_path: "qwen.qwen3-235b-a22b-2507-v1:0"
+  attack_model_path: "Qwen/Qwen3-4B-Instruct-2507"
   attack_weaker_model_path: "Qwen/Qwen3-4B-Base"
   extractor_model_path: "Qwen/Qwen3-4B-Instruct-2507"
   merger_model_path: "Qwen/Qwen3-4B-Instruct-2507"
@@ -16,3 +16,6 @@ runtime:
   num_samples_per_goal: 1
   max_length: 512
   verbose: true
+  use_vllm: true
+  vllm_instruct_port: 8100
+  vllm_base_port: 8101

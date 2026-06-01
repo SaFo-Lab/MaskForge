@@ -1,0 +1,15 @@
+\begin{table}[htb]
+\centering
+\caption{\textbf{Ablation for structural pattern abstraction.} JailbreakBench (100 goals/victim), Strip-ASR-LLM (\%) and Harmscore (1--5), Bedrock Qwen3-235B judge. \textsc{No-schema} replaces \textsc{attacker.instantiate} with pure best-of-$k{=}3$ retrieval over the goal-type bucket: the stored representative template is sent to the victim verbatim, with no schema-conditioned regeneration.}
+\label{tab:ablation_schema}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|cccccc|cc}
+\toprule
+Variant & \multicolumn{2}{c}{Dream-Instruct} & \multicolumn{2}{c}{LLaDA} & \multicolumn{2}{c}{LLaDA-1.5} & \multicolumn{2}{c}{AVG.} \\
+ & ASR & HS & ASR & HS & ASR & HS & ASR & HS \\
+\midrule
+\textbf{Full} & 79.0 & 4.73 & 78.0 & 4.84 & 68.6 & 4.74 & 75.2 & 4.77 \\
+No-schema (raw retrieval) & 56.0 & 3.38 & 46.0 & 3.91 & 35.0 & 3.84 & 45.7 & 3.71 \\
+\bottomrule
+\end{tabular}}
+\end{table}
