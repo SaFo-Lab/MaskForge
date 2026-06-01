@@ -162,6 +162,51 @@ Outputs land in `results/transition_v2/advbench_{victim}.json`. The
 / dija), `transition_embed.py` (BGE cosine retrieval), and
 `transition_random_global.py` (uniform-random over the whole registry).
 
+## Static evaluation with `benchmark/`
+
+For a quick static probe you do **not** need to run any of the stages above.
+`benchmark/{jailbreak,harmbench,strongreject}.json` ships 100 goals per
+benchmark, each with up to 3 high-transferability templates that successfully
+broke ≥ 4 of the 5 victims. Each record is
+
+```json
+{
+  "goal_id": "jbb_0",
+  "goal": "...",
+  "templates": ["<template with <mask:N> placeholders>", "...", "..."]
+}
+```
+
+Expand `<mask:N>` to the victim's mask token (`<|mask|>` for Dream / LLaDA2,
+`<|mdm_mask|>` for LLaDA / LLaDA-1.5 / MMaDA), submit, and judge — no
+attacker LLM, no scorer, no UCB:
+
+```python
+import json, re
+from inference import load_victim, run_victim_online
+
+MASK_TOKEN = "<|mask|>"   # pick per victim
+victim_cfg = "configs/dream_attack.yaml"
+_, model, tok = load_victim(victim_cfg)
+
+def expand(tmpl):
+    return re.sub(r"<mask:(\d+)>", lambda m: MASK_TOKEN * int(m.group(1)), tmpl)
+
+records = json.load(open("benchmark/jailbreak.json"))
+for r in records:
+    for tmpl in r["templates"]:
+        out = run_victim_online(
+            victim_model=model, victim_tokenizer=tok,
+            prompt=r["goal"], template=expand(tmpl),
+            victim_config_path=victim_cfg,
+        )
+        # judge `out` with evaluation.py / your own scorer
+```
+
+This is the simplest reproduction path for any new victim and the cheapest
+way to compare different decoding settings (mask ratio, step count, block
+size, …) against a fixed set of known-good attacks.
+
 ## Repository layout
 
 ```
@@ -185,8 +230,7 @@ sample/                   Per-victim dLLM mask-fill (LLaDA, LLaDA2, Dream, MMaDA
 configs/                  YAML configs (one per victim, plus expansion / exploration)
 data/                     JBB, HB, StrongReject, AdvBench goal files
 scripts/                  Per-GPU runners, judges, taxonomy / embedding helpers
-benchmark/                Curated (goal, template) pairs for downstream alignment
-tables/                   Paper tables + ablation TeX
+benchmark/                Curated (goal, template) pairs for static evaluation
 ```
 
 ## Citation
