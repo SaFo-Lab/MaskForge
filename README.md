@@ -1,6 +1,6 @@
 # MaskForge: Structure-Aware Adaptive Attacks for Jailbreaking Diffusion Large Language Models 
 
-[**Paper (arXiv)**][https://arxiv.org/abs/2606.04027]
+[[**Paper (arXiv)**]](https://arxiv.org/abs/2606.04027)
 
 Search-based red-team attack on diffusion LLMs (dLLMs). The attacker generates
 a `<mask:N>` template; the victim dLLM fills the masks in parallel and emits
