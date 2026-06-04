@@ -1,6 +1,6 @@
 # MaskForge: Structure-Aware Adaptive Attacks for Jailbreaking Diffusion Large Language Models 
 
-[**Paper (arXiv)**](https://arxiv.org/abs/XXXX.XXXXX)
+[**Paper (arXiv)**]([https://arxiv.org/abs/XXXX.XXXXX](https://arxiv.org/abs/2606.04027))
 
 Search-based red-team attack on diffusion LLMs (dLLMs). The attacker generates
 a `<mask:N>` template; the victim dLLM fills the masks in parallel and emits
@@ -240,13 +240,13 @@ If you use this code or the released pattern library / benchmark in your
 research, please cite:
 
 ```bibtex
-@article{attack4dllm,
-  title  = {<paper title>},
-  author = {<author list>},
-  year   = {<year>},
-  eprint = {XXXX.XXXXX},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.CR},
-  url    = {https://arxiv.org/abs/XXXX.XXXXX}
+@misc{ma2026maskforgestructureawareadaptiveattacks,
+      title={MaskForge: Structure-Aware Adaptive Attacks for Jailbreaking Diffusion Large Language Models}, 
+      author={Yingzi Ma and Zhengyue Zhao and Xiaogeng Liu and Minhui Xue and Yue Zhao and Chaowei Xiao},
+      year={2026},
+      eprint={2606.04027},
+      archivePrefix={arXiv},
+      primaryClass={cs.CR},
+      url={https://arxiv.org/abs/2606.04027}, 
 }
 ```
